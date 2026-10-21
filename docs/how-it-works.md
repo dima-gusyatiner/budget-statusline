@@ -12,7 +12,9 @@ flowchart LR
     Q2 -- yes --> B["cap: the gateway's"]
     Q2 -- no --> Q3{"Enterprise usage-based seat?"}
     Q3 -- yes --> C["cap: the monthly one, from the usage endpoint"]
-    Q3 -- no --> D["dollar estimate"]
+    Q3 -- no --> Q4{"window another session saw in the last 30 minutes?"}
+    Q4 -- yes --> E["that window, from the shared record"]
+    Q4 -- no --> D["dollar estimate"]
 ```
 
 The same in words, for places that do not draw the diagram:
@@ -20,7 +22,8 @@ The same in words, for places that do not draw the diagram:
 1. The JSON has a 5-hour or 7-day window: Pro or Max. Each window it has is drawn, and [usage credits](accounts.md#usage-credits) are added while one of them is full.
 2. The JSON has a gateway spend limit: drawn as `cap`. A JSON with plan windows and a spend limit draws both, but never usage credits: behind a gateway the gateway sets the budget, and the refresher, which reads the login, does not run.
 3. Neither, on an Enterprise usage-based seat: the monthly cap, from the [usage endpoint](usage-endpoint.md).
-4. None of these: the local dollar estimate, unless this machine has shown plan windows in the last 8 days (see [the first render of a new chat](#the-first-render-of-a-new-chat)).
+4. None of these, and another session of the login has seen a window in the last 30 minutes: that window, from the shared record, until this session's own figures arrive (see [the first render of a new chat](#the-first-render-of-a-new-chat)).
+5. None of these, and no such window: the local dollar estimate, unless this machine has shown plan windows in the last 8 days (see [the same section](#the-first-render-of-a-new-chat)).
 
 ## Spotting an Enterprise seat
 
@@ -34,7 +37,11 @@ The care is there for one case: a machine that moved from an Enterprise seat to 
 
 ## The first render of a new chat
 
-Claude Code passes the plan windows "only after the first API response in the session", in the words of its [status line documentation](https://code.claude.com/docs/en/statusline). So the first render of a new chat on a Pro or Max seat has no windows, and would fall through to the dollar estimate. To keep dollars off a seat that does not pay per token, the dollar estimate stays hidden for 8 days after the line last saw plan windows on this machine. Past that, the seat is taken to have changed.
+Claude Code passes the plan windows "only after the first API response in the session", in the words of its [status line documentation](https://code.claude.com/docs/en/statusline). So a new chat has no windows of its own until its first reply.
+
+Until then it shows the figures the other sessions of the login share: each window from its [record](#several-sessions), the 5-hour, the 7-day and a gateway's cap, drawn as those sessions draw it, burn estimate included. A window counts while its reset is still to come and some session has seen its figure in the last 30 minutes. The new chat only reads the records, so it never keeps alive a figure no session has heard from the server. Its first reply brings its own figures, and from then on it draws those.
+
+With no such window, in the first session after a quiet half hour say, a new chat on a Pro or Max seat would fall through to the dollar estimate. To keep dollars off a seat that does not pay per token, the dollar estimate stays hidden for 8 days after the line last saw plan windows on this machine. Past that, the seat is taken to have changed.
 
 ## Several sessions
 
@@ -42,6 +49,7 @@ A session only hears the replies to its own requests, so one left idle keeps the
 
 - The record keeps the highest figure any session has shown in the window. Within a window usage only goes up, so a lower figure is an older reading.
 - A session whose own figure is lower draws the record's, as long as some session has shown it in the last 30 minutes. A tab left open on 45% shows the 62% another one has seen.
+- A new session, with no figure of its own until its first reply, draws the record's on the same terms and only reads it. See [the first render of a new chat](#the-first-render-of-a-new-chat).
 - A window is known by its reset time. A reset time more than 10 minutes later starts a new record.
 - A session left idle past its window's reset draws the newer window from the record, its figure and its reset time, once another session has seen it. Until then the window reads a dim `5h reset` (or `7d reset`, `cap reset`), with no old figure and no burn estimate, until a reply brings the new one. While its own window still runs, a session keeps its own figure.
 - The Enterprise snapshot and the credits figures are read by every session from one file, so a lower figure there is the server's newer word and is drawn at once.
