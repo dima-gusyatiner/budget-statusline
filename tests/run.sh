@@ -1461,6 +1461,23 @@ out=$(lim $((T0 + 60)) C "$(gw 85 $((T0 + 3600)))" | strip)
 out=$(lim $((T0 + 60)) B '' CC_ENTERPRISE=1 | strip)
 { has "$out" '· cap' && ! has "$out" '· 5h' && ! has "$out" '· 7d' && ! has "$out" '85%'; } || bad="$bad [Enterprise: $out]"
 verdict a-session-with-limits-of-its-own-is-unchanged "$bad"
+# Only before the session's first reply, while it has spent nothing. A session
+# that has spent something and still has no limits is on an API key, Bedrock or
+# Vertex, or was resumed with its cost carried over: it draws no window from
+# the records, however fresh. A cost of 0, as at the start, still draws them.
+anew; bad=; t5=$((T0 + 10800)) t7=$((T0 + 300000))
+lim $T0 A "$(pro 64 41)" >/dev/null
+spent() {  # spent <cost>: a render a minute on, with that cost and no limits
+  printf '{"session_id":"K","workspace":{"current_dir":"%s"},"cost":{"total_cost_usd":%s}}' "$W" "$1" \
+    | env PATH="$W/bin:$PATH" FAKE_NOW=$((T0 + 60)) HOME="$W/home" CC_WIDTH=0 LC_ALL=C "$shell" "$W/statusline.sh" | strip
+}
+for c in 0 0.0; do
+  out=$(spent $c); like "$out" '*· 5h ??:?? 64% · 7d ??? 41%' || bad="$bad [cost $c: $out]"
+done
+for c in 0.42 0.0001 1e-7; do
+  out=$(spent $c); { has "$out" '· 5h' || has "$out" '· 7d'; } && bad="$bad [cost $c: $out]"
+done
+verdict only-before-the-first-reply "$bad"
 rm -rf "$W"
 
 # --- plain ASCII ---

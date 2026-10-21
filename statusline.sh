@@ -654,14 +654,22 @@ credits() {
 f5= f7= drew=
 [ -n "$p5" ] && { window "$p5" "$r5" "5h " "%H:%M" 5h; f5=$p r5=$rw; }   # 5-hour window
 [ -n "$p7" ] && { window "$p7" "$r7" "7d " "%a"    7d; f7=$p r7=$rw; }   # 7-day window
-# A payload with no limits at all, off the Enterprise path: the figures other
-# sessions heard lately, until this session's own arrive. `f5` and `f7` stay
+# A payload with no limits at all, off the Enterprise path, before the session's
+# first reply: the figures other sessions heard lately, until this session's
+# own arrive with that reply. No reply yet means no cost yet, a
+# `cost.total_cost_usd` of 0 (`0.0` from some `jq`) or none. A session that has
+# spent something and still has no limits is on an API key, Bedrock or Vertex,
+# whose budget the records do not hold, or was resumed with its cost carried
+# over, and its own figures come with its next reply. `f5` and `f7` stay
 # empty, so usage credits are not looked up: that is for a session the server
 # has told its window is full. A window drawn here (`$drew`) also rules out the
 # ledger below, with no look at the records' dates.
-if [ -z "$p5$p7$ps" ] && [ -z "$ent" ]; then
-  heard 5h "5h " "%H:%M"; heard 7d "7d " "%a"; heard gateway "cap " "%H:%M" "%d/%b"
-fi
+case "$usd" in
+  *[!0.]*) ;;                                          # it has spent something
+  *) if [ -z "$p5$p7$ps" ] && [ -z "$ent" ]; then
+       heard 5h "5h " "%H:%M"; heard 7d "7d " "%a"; heard gateway "cap " "%H:%M" "%d/%b"
+     fi ;;
+esac
 # Usage credits for a full window, but never behind a Claude apps gateway
 # (`rate_limits.spend_limit`): there the gateway sets the budget, and the
 # refresher, which reads the login, must not run.
