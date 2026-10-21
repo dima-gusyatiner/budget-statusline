@@ -12,10 +12,14 @@ sl="$here/../statusline.sh"
 shell=${SL_SHELL:-sh}
 fails=0
 # Settings left in the shell that runs the suite would change what it sees.
-unset CC_WIDTH COLUMNS
+unset CC_WIDTH CC_ASCII COLUMNS
 # The locale too: the suite reads numbers and dates in the C locale, and a check
 # that wants another one sets it.
 unset LANG LC_ALL LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MESSAGES LC_MONETARY
+# Most checks read the symbols, so the plain ASCII line is off unless a check
+# turns it on. Left to itself it would follow the locale and terminal of
+# whoever runs the suite.
+CC_ASCII=0; export CC_ASCII
 E=$(printf '\033')
 
 # What a terminal would show: colour codes and the hyperlink wrapper removed.
@@ -229,6 +233,65 @@ out=$(printf '{"workspace":{"current_dir":"%s/repo"}}' "$I" | env HOME="$I/home"
 bad=; [ "$(idx)" = "$before" ] || bad=" [the index was rewritten]"; has "$out" 'git:(' || bad="$bad [drew: $out]"
 verdict render-leaves-the-index-alone "$bad"
 rm -rf "$I"
+
+# --- plain ASCII ---
+# look [VAR=value...]: "ascii" or "symbols", as one subscription render draws
+# it, with every input the guess reads cleared first. `uname` is a stand-in that
+# answers `FAKE_UNAME` and notes each call in `$U/called`.
+U=$(mktemp -d); mkdir -p "$U/bin" "$U/home/.claude"; cp "$sl" "$U/statusline.sh"
+printf '#!/bin/sh\necho x >> "%s/called"\necho "${FAKE_UNAME:-Linux}"\n' "$U" > "$U/bin/uname"; chmod +x "$U/bin/uname"
+look() {
+  o=$(sed -e "s|__CWD__|$here|" -e "s|__T1__|$(( $(date +%s) + 7200 ))|" -e "s|__T2__|$(( $(date +%s) + 200000 ))|" "$here/payloads/subscription.json" \
+    | env -u CC_ASCII -u LC_ALL -u LC_CTYPE -u LANG -u TERM -u WT_SESSION -u TERM_PROGRAM -u OS \
+          HOME="$U/home" PATH="$U/bin:$PATH" CC_WIDTH=0 "$@" "$shell" "$U/statusline.sh" 2>/dev/null | strip)
+  case "$o" in *'(1M) high | ctx'*) echo ascii ;; *'(1M) ◊high · ctx'*) echo symbols ;; *) echo "neither: $o" ;; esac
+}
+utf=LANG=en_US.UTF-8 win=OS=Windows_NT gitbash=FAKE_UNAME=MINGW64_NT-10.0-19045; bad=
+for row in "ascii|CC_ASCII=1 $utf TERM_PROGRAM=x" "symbols|CC_ASCII=0 TERM=linux $win $gitbash" \
+           "ascii|TERM=linux $utf" "ascii|" "ascii|LANG=C" "ascii|LANG=de_DE.ISO8859-1" \
+           "symbols|$utf" "symbols|LC_CTYPE=en_US.UTF-8" "symbols|LC_ALL=C.UTF-8" "symbols|LANG=C.utf8" \
+           "ascii|$utf $win $gitbash" "ascii|$utf $win FAKE_UNAME=MSYS_NT-10.0-19045" "ascii|$utf $win FAKE_UNAME=CYGWIN_NT-10.0-19045" \
+           "symbols|$utf $win $gitbash WT_SESSION=0b9e" "symbols|$utf $win $gitbash TERM_PROGRAM=mintty" "symbols|$utf $win FAKE_UNAME=Linux"; do
+  want=${row%%|*}; set -- ${row#*|}
+  got=$(look "$@"); [ "$got" = "$want" ] || bad="$bad [${row#*|}: $got]"
+done
+verdict ascii-rules "$bad"
+# Off Windows the guess costs no process: `uname` is never asked, even with no
+# terminal named.
+rm -f "$U/called"; look "$utf" "$gitbash" >/dev/null
+check ascii-asks-uname-only-on-windows "$(cat "$U/called" 2>/dev/null)" "" "x"
+# The whole line in plain ASCII, from a repository with an uncommitted change.
+git init -q "$U/repo" 2>/dev/null; git -C "$U/repo" symbolic-ref HEAD refs/heads/main
+printf 'a\n' > "$U/repo/f"; git -C "$U/repo" add f; git -C "$U/repo" -c user.name=t -c user.email=t@t commit -qm x 2>/dev/null
+apay() { apayraw "$@" | strip; }   # apay <cwd> [VAR=value...]: the full subscription line, with CC_ASCII=1
+apayraw() {  # the same, escape codes and all
+  c=$1; shift
+  printf '{"model":{"display_name":"Opus 5 (1M context)"},"effort":{"level":"high"},"workspace":{"current_dir":"%s"},"context_window":{"total_input_tokens":36400,"used_percentage":17.6},"rate_limits":{"five_hour":{"used_percentage":24,"resets_at":%s},"seven_day":{"used_percentage":62,"resets_at":%s}}}' \
+    "$c" "$(( $(date +%s) + 7200 ))" "$(( $(date +%s) + 200000 ))" | env HOME="$U/home" CC_WIDTH=0 CC_ASCII=1 "$@" "$shell" "$U/statusline.sh"
+}
+printf 'b\n' >> "$U/repo/f"; out=$(apay "$U/repo"); bad=
+like "$out" 'git:(main) \* | Opus 5 (1M) high | ctx 36.4k 18% | 5h ??:?? 24% | 7d ??? 62%' || bad=" [dirty: $out]"
+[ "$(printf '%s' "$out" | LC_ALL=C tr -d '\040-\176' | wc -c | tr -d ' ')" = 0 ] || bad="$bad [not plain ASCII]"
+git -C "$U/repo" checkout -q -- f; out=$(apay "$U/repo")
+like "$out" 'git:(main) | Opus*' || bad="$bad [clean: $out]"
+verdict ascii-full-line "$bad"
+# With the symbols, an uncommitted change is a yellow ✗ and a clean tree a green ✓.
+printf 'b\n' >> "$U/repo/f"; raw=$(apayraw "$U/repo" CC_ASCII=0); bad=
+like "$(printf '%s' "$raw" | strip)" 'git:(main) ✗ · Opus*' || bad=" [dirty: $(printf '%s' "$raw" | strip)]"
+has "$raw" "${E}[33m✗" || bad="$bad [✗ not yellow]"
+git -C "$U/repo" checkout -q -- f; raw=$(apayraw "$U/repo" CC_ASCII=0)
+like "$(printf '%s' "$raw" | strip)" 'git:(main) ✓ · Opus*' || bad="$bad [clean: $(printf '%s' "$raw" | strip)]"
+has "$raw" "${E}[32m✓" || bad="$bad [✓ not green]"
+verdict dirty-tree-is-marked "$bad"
+# Narrow: a long name keeps 11 characters and "..", the same 13 columns; the
+# folder has no mark; the effort alone says what it is.
+mkdir -p "$U/a-very-long-folder-name"; git -C "$U/repo" checkout -q -b feat/a-long-branch-name-here; bad=
+[ "$(apay "$U/repo" CC_WIDTH=35)" = 'a-long-bran.. ctx 18% 5h 24% 7d 62%' ] || bad=" [branch: $(apay "$U/repo" CC_WIDTH=35)]"
+[ "$(apay "$U/a-very-long-folder-name" CC_WIDTH=35)" = 'a-very-long.. ctx 18% 5h 24% 7d 62%' ] || bad="$bad [folder: $(apay "$U/a-very-long-folder-name" CC_WIDTH=35)]"
+out=$(sed -e "s|__CWD__|$here|" "$here/payloads/effort-only.json" | env HOME="$U/home" CC_WIDTH=0 CC_ASCII=1 "$shell" "$U/statusline.sh" | strip)
+has "$out" ' | effort high | ctx 880' || bad="$bad [effort alone: $out]"
+verdict ascii-narrow-and-effort "$bad"
+rm -rf "$U"
 
 # static guarantees
 sh -n "$sl" && echo "ok   syntax" || { echo "FAIL syntax"; fails=$((fails+1)); }
