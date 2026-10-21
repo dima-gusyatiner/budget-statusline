@@ -1540,6 +1540,21 @@ verdict ascii-narrow-and-effort "$bad"
 rm -rf "$U"
 
 # static guarantees
+# Docs point at the scripts and never paste them: a pasted copy forks the moment
+# one side is edited. A pasted body carries a shebang or the longest line of the
+# script, so look for both in every doc. A missing doc is a failure too, or the
+# check would pass on a path that no longer exists.
+bad=
+for f in "$here/../README.md" "$here"/../docs/*.md; do
+  [ -f "$f" ] || { bad="$bad missing:$f"; continue; }
+  grep -q '^#!/' "$f" && bad="$bad shebang:$f"
+  for s in statusline.sh usage-refresh.sh; do
+    longest=$(awk 'length($0) > m { m = length($0); l = $0 } END { print l }' "$here/../$s")
+    [ -n "$longest" ] && grep -qF -- "$longest" "$f" && bad="$bad $s:$f"
+  done
+done
+if [ -z "$bad" ]; then echo "ok   doc-references-not-embeds"
+else echo "FAIL doc-references-not-embeds:$bad"; fails=$((fails+1)); fi
 sh -n "$sl" && sh -n "$here/../usage-refresh.sh" && echo "ok   syntax" || { echo "FAIL syntax"; fails=$((fails+1)); }
 
 [ "$fails" -eq 0 ] && echo "ALL PASS" || echo "$fails FAILED"
