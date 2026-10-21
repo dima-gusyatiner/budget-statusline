@@ -25,9 +25,10 @@ E=$(printf '\033')
 Z="${E}[0m" DIM="${E}[2m" RED="${E}[31m" GRN="${E}[32m" YEL="${E}[33m"
 MAG="${E}[35m" CYN="${E}[36m" BLU="${E}[1;34m"
 
-# `SEP` between groups, then the marks for a dirty and a clean tree, a
-# folder outside git and the effort.
-SEP=" ${DIM}·${Z} " DIRTY=✗ CLEAN=✓ FOLDER=⌂ EFFORT=◊
+# `SEP` between groups, `ELL` for a name cut short (after `KEEP` characters) and
+# then the marks for a dirty and a clean tree, a folder outside git and the
+# effort.
+SEP=" ${DIM}·${Z} " ELL=… KEEP=12 DIRTY=✗ CLEAN=✓ FOLDER=⌂ EFFORT=◊
 now=$(date +%s)
 
 # at <epoch> <format>: the time in the local zone, by BSD `date -r`, else GNU
@@ -37,8 +38,50 @@ at() { case "$1" in ''|*[!0-9]*) return;; esac
 # ramp <percent>: its colour, in `$R`: green under 50, yellow from 50, red from 80
 ramp() { if [ "$1" -ge 80 ]; then R=$RED; elif [ "$1" -ge 50 ]; then R=$YEL; else R=$GRN; fi; }
 
+# width: the columns the line may take, in `$cols`, or empty when unknown.
+# Claude Code passes its terminal width as `COLUMNS`, and the status line box
+# loses 2 columns of padding on each side. Its `padding` setting takes 2 more
+# per step, which the script cannot see: `CC_WIDTH` covers that. A positive
+# `CC_WIDTH` is the width itself, a negative one is taken off `COLUMNS` instead
+# of the 4, and 0 turns the fitting off. A resize alone does not re-run the
+# command, so the line catches up at the next update or `refreshInterval` tick.
+width() {
+  cols=
+  m=4
+  case "${CC_WIDTH:-}" in
+    0) return ;;
+    -*[!0-9]*|-) ;;
+    -*) m=${CC_WIDTH#-} ;;
+    *[!0-9]*|'') ;;
+    *) cols=$CC_WIDTH; return ;;
+  esac
+  c=${COLUMNS:-}
+  case "$c" in ''|*[!0-9]*) return ;; esac
+  # Arithmetic reads a leading 0 as octal, and `08` is an error that ends the
+  # script under `dash`, so strip leading zeros first.
+  m=${m#"${m%%[!0]*}"}; m=${m:-0}
+  c=${c#"${c%%[!0]*}"}; c=${c:-0}
+  [ "$c" -gt "$m" ] && cols=$((c - m))
+}
+
 # The line is put together at the very end, out of one variable per group:
-# `sg` git, `sm` model and effort, `sc` context, `sb` budget.
+# `sg` git, `sm` model and effort, `sc` context, `sb` budget. Each group also
+# keeps one or two shorter forms (`sg1`, `sg2`, `sm1`, `sc1`, `sbs`, `sb1`) for a
+# terminal too narrow for the full line. See "fit the terminal" at the bottom.
+
+# short <text>: a text over 13 characters cut to 12 and an ellipsis, in
+# `$short`; at 13 or fewer the cut would save nothing. A shell that counts bytes
+# (`dash`, or any shell in the C locale) would cut a character in half. Such a
+# shell also sees non-ASCII bytes as unprintable, so the `[:print:]` test leaves
+# those names whole there, and a shell that counts characters cuts between
+# characters.
+short() {
+  short=$1
+  case "$short" in *[![:print:]]*) return ;; esac
+  [ "${#short}" -gt 13 ] || return 0
+  while [ "${#short}" -gt "$KEEP" ]; do short=${short%?}; done
+  short="${short}${ELL}"
+}
 
 # clean <text>: the text without control characters, left in `$clean`. A folder,
 # model or effort name is printed as it is, and an escape or a BEL in it could
@@ -72,47 +115,58 @@ br=$(g symbolic-ref --short HEAD)
 if [ -n "$br" ]; then
   if [ -n "$(g status --porcelain | head -1)" ]; then f=" ${YEL}${DIRTY}"; else f=" ${GRN}$CLEAN"; fi
   sg="${lk}${BLU}git:(${RED}${br}${BLU})${f}${Z}${fz}"
+  sg1="${lk}${RED}${br}${f}${Z}${fz}"
+  short "${br#*/}"               # `feat/narrow-layout` reads `narrow-layout`
+  sg2="${lk}${RED}${short}${f}${Z}${fz}"
 else
   clean "$(basename "$cwd")"; dir=$clean
-  sg="${lk}${CYN}${FOLDER}${dir}${Z}${fz}"
+  sg="${lk}${CYN}${FOLDER}${dir}${Z}${fz}"; sg1=$sg
+  short "$dir"
+  sg2="${lk}${CYN}${FOLDER}${short}${Z}${fz}"
 fi
 
 # --- 2. model, 3. effort: one group, a space between the two and no dot ---
 clean "$mdl"; mdl=$clean; clean "$eff"; eff=$clean
 # "Opus 5 (1M context)" reads "Opus 5 (1M)": the first " context)" loses its word.
 case "$mdl" in *" context)"*) mdl="${mdl%% context)*})${mdl#* context)}" ;; esac
-sm=
-[ -n "$mdl" ] && sm="${YEL}${mdl}${Z}"
+sm= sm1=
+[ -n "$mdl" ] && { sm="${YEL}${mdl}${Z}"; sm1="${YEL}${mdl%% (*}${Z}"; }      # `sm1`: no "(1M)"
 if [ -n "$eff" ]; then
   ef="${MAG}${EFFORT}${eff}${Z}"
-  sm="${sm:+$sm }$ef"
+  sm="${sm:+$sm }$ef"; sm1="${sm1:+$sm1 }$ef"
 fi
 
 # --- 4. context window: raw / 36.4k / 235k ---
-sc=
+sc= sc1=
 if [ "$tok" -gt 0 ] 2>/dev/null; then
   if [ "$tok" -lt 1000 ]; then k=$tok
   elif [ "$tok" -lt 100000 ]; then k=$(awk "BEGIN{printf\"%.1fk\",$tok/1000}")
   else k="$(( (tok + 500) / 1000 ))k"; fi
-  sc="${DIM}ctx${Z} ${k}"
+  sc="${DIM}ctx${Z} ${k}"; sc1=$sc
   # The share can be missing early in a session; then only the token count shows.
   if [ -n "$ctxp" ]; then
     ci=$(printf '%.0f' "$ctxp" 2>/dev/null)
     ramp "${ci:-0}" 2>/dev/null; sc="${sc} ${R}${ci}%${Z}"
+    sc1="${DIM}ctx${Z} ${R}${ci}%${Z}"                # `sc1`: the share alone
   fi
 fi
 
-sb=
-add() { sb="${sb:+$sb$SEP}$1"; }
+# Budget items collect three times over: `$sb` in full with a dot between items,
+# `$sbs` the same with a space, and `$sb1` bare: the label and the figure,
+# without the reset stamp.
+# add <full> [bare]: an item with no shorter form passes one argument
+sb= sbs= sb1=
+add() { sb="${sb:+$sb$SEP}$1"; sbs="${sbs:+$sbs }$1"; sb1="${sb1:+$sb1 }${2:-$1}"; }
 
 # window <pct> <resets_at> <label> <time-format>: one window as a budget item.
-# The label carries its own trailing space ("5h ").
+# The label carries its own trailing space ("5h "), so the bare form reads
+# 5h 24%.
 window() {
   p=$(printf '%.0f' "$1" 2>/dev/null) || return
   [ "$p" -lt 0 ] && return                            # a negative figure is garbage
   stamp=$(at "$2" "$4")
   ramp "$p"
-  add "${R}$3${stamp:+$stamp }${p}%${Z}"
+  add "${R}$3${stamp:+$stamp }${p}%${Z}" "${R}$3${p}%${Z}"
 }
 
 # --- 5. budget: always shown, colour carries severity, no threshold gating ---
@@ -127,8 +181,36 @@ if [ -n "$ps" ]; then                                  # gateway spend cap
   window "$ps" "$rs" "cap " "$fmt"
 fi
 
+# --- fit the terminal ---
 # join <separator> <group>...: the groups that are not empty, in `$line`
 join() { j=$1; shift; line=; for s in "$@"; do [ -n "$s" ] && line="${line:+$line$j}$s"; done; }
 
 join "$SEP" "$sg" "$sm" "$sc" "$sb"; full=$line
-printf '%s' "$full"
+width
+[ -n "$cols" ] || { printf '%s' "$full"; exit 0; }
+
+# Narrower forms, each giving up a little more. The budget is the point of the
+# line, so it goes last and never entirely. `awk` prints the first form that
+# fits in `$cols` columns, or the last one when none does.
+join "$SEP" "$sg1" "$sm"  "$sc"  "$sb";  l1=$line   # no `git:( )` around the branch
+join ' '    "$sg1" "$sm"  "$sc"  "$sbs"; l2=$line   # spaces for the dots
+join ' '    "$sg1" "$sm1" "$sc1" "$sbs"; l3=$line   # no (1M), no token count
+join ' '    "$sg2" "$sm1" "$sc1" "$sbs"; l4=$line   # branch without its type, cut short
+join ' '    "$sg2" "$sm1" "$sc1" "$sb1"; l5=$line   # budget bare: label and figure
+join ' '    "$sg2" "$sc1" "$sb1";        l6=$line   # no model, no effort
+join ' '    "$sc1" "$sb1";               l7=$line   # no branch
+# Width is counted the way a terminal draws: colour codes and the hyperlink
+# wrapper take no room, and a character is one column however many bytes it is.
+# In the C locale `awk` sees bytes, so dropping UTF-8 continuation bytes (octal
+# 200 to 277) leaves one byte per character.
+LC_ALL=C awk -v w="$cols" 'BEGIN {
+  for (i = 1; i < ARGC; i++) {
+    if (ARGV[i] == "") continue
+    s = pick = ARGV[i]
+    gsub(/\033\]8;;[^\033]*\033\\/, "", s)
+    gsub(/\033\[[0-9;]*m/, "", s)
+    gsub(/[\200-\277]/, "", s)
+    if (length(s) <= w) break
+  }
+  printf "%s", pick
+}' "$full" "$l1" "$l2" "$l3" "$l4" "$l5" "$l6" "$l7" "$sb1" 2>/dev/null || printf '%s' "$full"
