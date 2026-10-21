@@ -12,7 +12,7 @@ flowchart LR
     Q2 -- yes --> B["cap: the gateway's"]
     Q2 -- no --> Q3{"Enterprise usage-based seat?"}
     Q3 -- yes --> C["cap: the monthly one, from the usage endpoint"]
-    Q3 -- no --> Q4{"window another session saw in the last 30 minutes?"}
+    Q3 -- no --> Q4{"no reply yet, and a window another session saw in the last 30 minutes?"}
     Q4 -- yes --> E["that window, from the shared record"]
     Q4 -- no --> D["dollar estimate"]
 ```
@@ -22,8 +22,8 @@ The same in words, for places that do not draw the diagram:
 1. The JSON has a 5-hour or 7-day window: Pro or Max. Each window it has is drawn, and [usage credits](accounts.md#usage-credits) are added while one of them is full.
 2. The JSON has a gateway spend limit: drawn as `cap`. A JSON with plan windows and a spend limit draws both, but never usage credits: behind a gateway the gateway sets the budget, and the refresher, which reads the login, does not run.
 3. Neither, on an Enterprise usage-based seat: the monthly cap, from the [usage endpoint](usage-endpoint.md).
-4. None of these, and another session of the login has seen a window in the last 30 minutes: that window, from the shared record, until this session's own figures arrive (see [the first render of a new chat](#the-first-render-of-a-new-chat)).
-5. None of these, and no such window: the local dollar estimate, unless this machine has shown plan windows in the last 8 days (see [the same section](#the-first-render-of-a-new-chat)).
+4. None of these, in a session that has had no reply yet, and another session of the login has seen a window in the last 30 minutes: that window, from the shared record, until the session's first reply (see [the first render of a new chat](#the-first-render-of-a-new-chat)).
+5. Otherwise: the local dollar estimate, unless this machine has shown plan windows in the last 8 days (see [the same section](#the-first-render-of-a-new-chat)).
 
 ## Spotting an Enterprise seat
 
@@ -39,7 +39,9 @@ The care is there for one case: a machine that moved from an Enterprise seat to 
 
 Claude Code passes the plan windows "only after the first API response in the session", in the words of its [status line documentation](https://code.claude.com/docs/en/statusline). So a new chat has no windows of its own until its first reply.
 
-Until then it shows the figures the other sessions of the login share: each window from its [record](#several-sessions), the 5-hour, the 7-day and a gateway's cap, drawn as those sessions draw it, burn estimate included. A window counts while its reset is still to come and some session has seen its figure in the last 30 minutes. The new chat only reads the records, so it never keeps alive a figure no session has heard from the server. Its first reply brings its own figures, and from then on it draws those.
+Until the session's first reply, it shows the figures the other sessions of the login share: each window from its [record](#several-sessions), the 5-hour, the 7-day and a gateway's cap, drawn as those sessions draw it, burn estimate included. A window counts while its reset is still to come and some session has seen its figure in the last 30 minutes. The new chat only reads the records, so it never keeps alive a figure no session has heard from the server. Its first reply brings its own figures, and from then on it draws those.
+
+No reply yet means no cost yet: `cost.total_cost_usd` is still 0. A session that has spent something and still has no windows is on an API key, Bedrock or Vertex, whose budget the records do not hold, or was resumed with its cost carried over and gets its own figures with its next reply. Neither draws the shared figures.
 
 With no such window, in the first session after a quiet half hour say, a new chat on a Pro or Max seat would fall through to the dollar estimate. To keep dollars off a seat that does not pay per token, the dollar estimate stays hidden for 8 days after the line last saw plan windows on this machine. Past that, the seat is taken to have changed.
 
