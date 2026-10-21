@@ -78,7 +78,7 @@ CLAUDE=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 cj="$CLAUDE/.config.json"; [ -f "$cj" ] || cj="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
 
 # `sh` has no `local`, so the longer functions prefix their working variables
-# (`yg_`, `r_`, `cr_`) to keep clear of the globals.
+# (`ss_`, `yg_`, `r_`, `cr_`) to keep clear of the globals.
 
 # at <epoch> <format>: the time in the local zone, by BSD `date -r`, else GNU
 # `date -d @`. Empty for anything but a whole epoch.
@@ -117,6 +117,20 @@ width() {
   [ "$c" -gt "$m" ] && cols=$((c - m))
 }
 
+# limits_seen: true when this login has shown limits in the payload in the
+# last 8 days: plan windows, or a gateway's spend limit. Neither comes before
+# the first reply of a session, so the first renders of a new chat would fall
+# through to the dollar ledger below, show a spend figure to someone who does
+# not pay per token, and with `CC_SPEND_CAP` a ledger record of its own. The
+# 5-hour, 7-day and gateway records are written only when real limits were
+# seen, so a recent one proves them. Eight days is one 7-day window plus slack:
+# past that the account may really have changed, and the ledger speaks again.
+limits_seen() {
+  for ss_f in "$CLAUDE/.rl-5h-state" "$CLAUDE/.rl-7d-state" "$CLAUDE/.rl-gateway-state"; do
+    young "$ss_f" && return 0
+  done
+  return 1
+}
 # young <file>: true when the file exists and was written in the last 8 days.
 # `date -r` reads a file's time on both BSD and GNU; `stat` differs between
 # them, so it is the fallback and needs both spellings.
@@ -130,7 +144,8 @@ young() {
 # The enterprise path (keychain, usage endpoint) runs only where it applies.
 # `CC_ENTERPRISE=1` forces it on, `0` forces it off. Unset, it runs when
 # `.claude.json` names an enterprise usage-based seat or an earlier fetch left a
-# snapshot under 8 days old (the latch below). Otherwise an API-key machine
+# snapshot under 8 days old (the latch below), and never on a machine that has
+# shown limits lately, plan windows or a gateway's. Otherwise an API-key machine
 # with a leftover claude.ai login would send that token upstream every hour.
 case "${CC_ENTERPRISE:-}" in
   1) ent=1 ;;
@@ -140,9 +155,13 @@ case "${CC_ENTERPRISE:-}" in
      # stays on through it, even if the string in `.claude.json` moves, and
      # `grep` is not needed. An older one no longer holds: an API-key machine
      # with a leftover snapshot would read the keychain hourly and draw "login"
-     # in place of its dollars.
+     # in place of its dollars. Recent limits win over both: an enterprise
+     # seat never sends them, so such a machine moved to Pro or Max, or behind
+     # a gateway, and kept the latch, and a new chat's first render there,
+     # before Claude Code has limits to pass, would call the endpoint for a cap
+     # that no longer applies.
      if young "$CLAUDE/.usage-cache.json" || grep -qs enterprise_usage_based "$cj"; then
-       ent=1
+       limits_seen || ent=1
      fi ;;
 esac
 
@@ -256,7 +275,9 @@ fi
 # session's own figure reached the record's. While that is under 30 minutes
 # ago, a session whose own figure is lower draws the record's; past that, its
 # own, which is how a figure the server lowers gets in. (A figure every session
-# reads from one file is the exception, see `record`.)
+# reads from one file is the exception, see `record`.) A session with no limits
+# yet, before its first reply, draws the record on the same terms and only
+# reads it: see `heard`.
 # The burn estimate comes from the record's rises: `pace`, in points a second,
 # is an exponentially weighted moving average of them. A rise counts in full
 # when it comes and fades with time constant `tau`, 30 minutes on the 5-hour
@@ -334,7 +355,7 @@ fields() {
 # estimate: the record's pace after this render in `$r_e`, and when the estimate
 # shows, the time to 100% in `$r_eta` ("25m", "1.2h") and 1 in `$r_red` when that
 # comes before the reset. It reads `$r_k`, `$rf`, `$r_B`, `$r_T`, `$r_E`,
-# `$r_l` and `$r_rise`, as `record` leaves them.
+# `$r_l` and `$r_rise`, as `record` and `heard` leave them.
 # Shown from 50% on the 5-hour window and 70% on longer ones, below 100%, once
 # the pace is 5 minutes old, and never for a window whose reset has passed:
 # `window()` draws no estimate for one, and leaving `r_show` empty there spares
@@ -365,6 +386,25 @@ burnmark() {
   bt=; [ -n "$r_eta" ] || return 0
   r_c=$DIM; [ "$r_red" = 1 ] && r_c=$RED
   bt=" ${r_c}${BURN}$r_eta${Z}"
+}
+# heard <key> <label> <time-format> [format past a day]: a window drawn from its
+# record alone, for a session with no limits of its own yet. Claude Code passes
+# `rate_limits` only after a session's first reply, so a new session would show
+# no budget though another session heard the figures minutes ago. It is drawn on
+# the terms a session with a lower figure draws it: its window a reset time
+# still to come, and its figure seen within the last 30 minutes. It is only
+# read: a render that heard nothing from the server must not keep a figure
+# alive. Sets `$drew` when it draws.
+heard() {
+  fields "$CLAUDE/.rl-$1-state"; [ -n "$r_ok" ] || return 0
+  case "$r_W" in *[!0-9]*) return 0 ;; esac      # a period's name, not a reset time
+  [ "$r_W" -gt "$now" ] && [ $((now - r_S)) -le 1800 ] || return 0
+  { [ "$r_T" -gt $((now + 60)) ] || [ "$r_S" -gt $((now + 60)) ]; } && return 0   # from the future
+  r_k=$1 rf=$r_P r_l=$((r_W - now)) r_rise=0
+  estimate; burnmark
+  hd_f=$3; [ -n "${4:-}" ] && [ "$r_l" -gt 86400 ] && hd_f=$4
+  stamp=$(at "$r_W" "$hd_f"); ramp "$rf"; drew=1
+  add "${R}$2${stamp:+$stamp }${rf}%${Z}${bt}" "${R}$2${rf}%${Z}"
 }
 # keep <file> <text>: the text into the file, through a temporary file so no
 # reader sees it half written. False when it could not be written.
@@ -611,9 +651,25 @@ credits() {
 # `f5` and `f7` keep the figures drawn, the freshest seen, for the credits
 # check, and `r5` and `r7` become the windows drawn, the record's newer one when
 # an idle session's own window is over.
-f5= f7=
+f5= f7= drew=
 [ -n "$p5" ] && { window "$p5" "$r5" "5h " "%H:%M" 5h; f5=$p r5=$rw; }   # 5-hour window
 [ -n "$p7" ] && { window "$p7" "$r7" "7d " "%a"    7d; f7=$p r7=$rw; }   # 7-day window
+# A payload with no limits at all, off the Enterprise path, before the session's
+# first reply: the figures other sessions heard lately, until this session's
+# own arrive with that reply. No reply yet means no cost yet, a
+# `cost.total_cost_usd` of 0 (`0.0` from some `jq`) or none. A session that has
+# spent something and still has no limits is on an API key, Bedrock or Vertex,
+# whose budget the records do not hold, or was resumed with its cost carried
+# over, and its own figures come with its next reply. `f5` and `f7` stay
+# empty, so usage credits are not looked up: that is for a session the server
+# has told its window is full. A window drawn here (`$drew`) also rules out the
+# ledger below, with no look at the records' dates.
+case "$usd" in
+  *[!0.]*) ;;                                          # it has spent something
+  *) if [ -z "$p5$p7$ps" ] && [ -z "$ent" ]; then
+       heard 5h "5h " "%H:%M"; heard 7d "7d " "%a"; heard gateway "cap " "%H:%M" "%d/%b"
+     fi ;;
+esac
 # Usage credits for a full window, but never behind a Claude apps gateway
 # (`rate_limits.spend_limit`): there the gateway sets the budget, and the
 # refresher, which reads the login, must not run.
@@ -730,7 +786,7 @@ elif [ -z "$p5" ] && [ -n "$ent" ]; then
     # snapshot is, or, while the first fetch is on its way, a dim placeholder.
     said "cap " || { [ -n "$ucx" ] && add "${DIM}cap stale $(agefmt "$cage")${Z}"; } || add "${DIM}cap ${ELL}${Z}"
   fi
-elif [ -z "$p5" ]; then
+elif [ -z "$p5" ] && [ -z "$drew" ] && ! limits_seen; then
   # No cached figures either (API key, Bedrock, Vertex). Claude Code only
   # reports this session's estimated cost, all it has spent since it started,
   # so keep a local ledger per period, one line per session:

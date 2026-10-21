@@ -496,6 +496,15 @@ snap 200 42; out=$(ent CC_USAGE_FLOOR=60);  { has "$out" '42%' && ! has "$out" '
 snap 400 42; has "$(ent CC_USAGE_FLOOR=0300)" '42%…6m' || bad="$bad [0300]"
 verdict floor-setting-is-checked "$bad"
 rm -rf "$H"
+# A machine that moved from an enterprise seat to Pro or Max keeps the latch
+# file. Recent 5-hour windows keep a new chat's first render (no limits yet) off
+# the enterprise path: no cap, no call.
+home; snap 9000 42; printf '%s 30\n' "$(date +%s)" > "$H/.claude/.rl-5h-state"
+out=$(printf '{"session_id":"t","version":"2.1.287","workspace":{"current_dir":"%s"},"cost":{"total_cost_usd":0}}' "$H" \
+      | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" | strip)
+sleep 1; bad=; { has "$out" '⌂' && ! has "$out" 'cap '; } || bad=" [drew: $out]"; [ ! -e "$H/started" ] || bad="$bad [called]"
+verdict plan-windows-beat-the-latch "$bad"
+rm -rf "$H"
 # The latch holds for a snapshot under 8 days old. A 40-day-old one on a machine
 # now on an API key gives way to the ledger, with no call; `.claude.json` naming
 # an enterprise seat still keeps the path on, whatever the snapshot's age.
@@ -533,6 +542,13 @@ out=$(sed -e "s|__CWD__|$here|" "$here/payloads/enterprise.json" | env HOME="$H"
 [ -e "$H/.claude/.usage-attempt" ] && bad="$bad [an attempt was written]"
 sleep 1; [ -e "$H/started" ] && bad="$bad [the refresher started]"
 verdict enterprise-0-sends-nothing "$bad"
+rm -rf "$H"
+# A plan's first render in a new chat, before Claude Code has limits to pass,
+# shows no dollars: a recent 5-hour record says the seat is a subscription.
+H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
+printf '%s 1800000000 1800000000 1800000000 30 0\n' "$(( $(date +%s) + 3600 ))" > "$H/.claude/.rl-5h-state"
+out=$(printf '{"session_id":"n","workspace":{"current_dir":"%s"},"cost":{"total_cost_usd":0.5}}' "$H" | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" | strip)
+check new-chat-on-a-plan-shows-no-dollars "$out" '⌂' '$'
 rm -rf "$H"
 # The ledger adds up every session of the period ($2.50 and $1.00 read $3.50),
 # drops a line from an earlier period, names the period `CC_SPEND_PERIOD` asks
@@ -590,6 +606,17 @@ has "$out" '¤' && bad=" [drew: $out]"; [ -e "$H/.claude/.usage-attempt" ] && ba
 sleep 1; [ -e "$H/started" ] && bad="$bad [the refresher started]"
 verdict gateway-never-starts-the-refresher "$bad"
 rm -rf "$H"
+# A gateway session's first renders come before its first reply and carry no
+# limits. With a gateway record from the last 8 days they draw no ledger, even
+# with `CC_SPEND_CAP` set, and leave the gateway's record alone.
+H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"; bad=
+printf '{"session_id":"g","workspace":{"current_dir":"%s"},"rate_limits":{"spend_limit":{"used_percentage":40,"resets_at":%s}}}' "$H" "$(( $(date +%s) + 200000 ))" \
+  | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" >/dev/null
+before=$(cat "$H/.claude"/.rl-*-state 2>/dev/null)
+out=$(printf '{"session_id":"g2","workspace":{"current_dir":"%s"},"cost":{"total_cost_usd":0}}' "$H" | env HOME="$H" CC_WIDTH=0 CC_SPEND_CAP=50 "$shell" "$H/statusline.sh" | strip)
+has "$out" '$' && bad=" [drew the ledger: $out]"
+[ "$(cat "$H/.claude"/.rl-*-state 2>/dev/null)" = "$before" ] || bad="$bad [a record changed: $(cat "$H/.claude"/.rl-*-state)]"
+rm -rf "$H"; verdict gateway-first-renders-draw-no-ledger "$bad"
 
 # --- narrow terminals ---
 # A scratch repository gives the git group a known branch, written by hand so a
@@ -1334,6 +1361,123 @@ out=$(wl $((T0 + 60)) B five_hour 97 $((T0 + 3600)) | strip)
 like "$out" '*5h ??:?? 100% · ¤credits' || bad=" [drew: $out]"
 [ -e "$W/home/.claude/.usage-attempt" ] || bad="$bad [did not ask]"
 verdict credits-from-the-freshest-figure "$bad"
+# A new session has no limits until its first reply. Until then it draws each
+# window from its record, while the record's reset is still to come and some
+# session has seen its figure in the last 30 minutes. Each check that something
+# is not drawn sits beside the same render a moment earlier, which draws it.
+lim() {  # lim <time> <session> <rate_limits JSON, or '' for none> [VAR=value...]: one render
+  l_t=$1 l_s=$2 l_j=; [ -n "$3" ] && l_j=",\"rate_limits\":$3"; shift 3
+  printf '{"session_id":"%s","workspace":{"current_dir":"%s"}%s}' "$l_s" "$W" "$l_j" \
+    | env PATH="$W/bin:$PATH" FAKE_NOW="$l_t" HOME="$W/home" CC_WIDTH=0 LC_ALL=C "$@" "$shell" "$W/statusline.sh"
+}
+pro() { printf '{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":%s,"resets_at":%s}}' "$1" "$t5" "$2" "$t7"; }
+gw() { printf '{"spend_limit":{"used_percentage":%s,"resets_at":%s}}' "$1" "$2"; }
+ondisk() { (cd "$W/home/.claude" && ls -A && cksum .rl-*-state) 2>/dev/null; }   # every file there, and each record's checksum
+# It draws them as the session that saw them does, at the same moment: colours,
+# reset times and burn estimate alike, in every width.
+anew; bad=; t5=$((T0 + 10800)) t7=$((T0 + 300000))
+lim $T0 A "$(pro 50 41)" >/dev/null; lim $((T0 + 300)) A "$(pro 55 41)" >/dev/null; lim $((T0 + 600)) A "$(pro 60 41)" >/dev/null
+for w in 0 44 36 24; do
+  a=$(lim $((T0 + 660)) A "$(pro 60 41)" CC_WIDTH=$w); b=$(lim $((T0 + 660)) B '' CC_WIDTH=$w)
+  [ "$b" = "$a" ] || bad="$bad [width $w: B drew $(printf '%s' "$b" | strip), A $(printf '%s' "$a" | strip)]"
+done
+raw=$(lim $((T0 + 660)) B ''); out=$(printf '%s' "$raw" | strip)
+like "$out" '*· 5h ??:?? 60% ↯*m · 7d ??? 41%' || bad="$bad [drew: $out]"
+{ has "$raw" "${E}[33m5h " && has "$raw" "${E}[31m↯" && has "$raw" "${E}[32m7d "; } || bad="$bad [colours]"
+verdict a-new-session-draws-the-shared-figures "$bad"
+# Reading the records starts no process: drawing them costs a new session no
+# more processes than the session that saw them pays to draw its own. Stand-ins
+# first on `PATH` note each command started.
+mkdir -p "$W/count"; bad=
+for t in awk basename cat cut date dirname find git grep head jq ls mv perl rm sed setsid stat tr uname wc; do
+  real=$(command -v "$t") || continue; [ "$t" = date ] && real="$W/bin/date"
+  printf '#!/bin/sh\necho %s >> "%s/count/log"\nexec "%s" "$@"\n' "$t" "$W" "$real" > "$W/count/$t"; chmod +x "$W/count/$t"
+done
+: > "$W/count/log"; lim $((T0 + 660)) A "$(pro 60 41)" PATH="$W/count:$W/bin:$PATH" >/dev/null; na=$(wc -l < "$W/count/log" | tr -d ' ')
+: > "$W/count/log"; out=$(lim $((T0 + 660)) B '' PATH="$W/count:$W/bin:$PATH" | strip); nb=$(wc -l < "$W/count/log" | tr -d ' ')
+like "$out" '*· 5h ??:?? 60% ↯*m · 7d ??? 41%' || bad=" [drew: $out]"
+[ "$nb" -le "$na" ] || bad="$bad [$nb processes, against $na: $(sort "$W/count/log" | uniq -c | tr -s ' \n' ' ')]"
+verdict a-new-session-starts-no-more-processes "$bad"
+# Past 30 minutes since a session last saw a window's figure, the figure may be
+# old, and a new session draws none of it. Each window goes by its own: A last
+# saw both at +600s, and C, with a 5-hour window of its own, saw that one rise
+# at +1200s.
+lim $((T0 + 1200)) C '{"five_hour":{"used_percentage":61,"resets_at":'"$t5"'}}' >/dev/null; bad=
+out=$(lim $((T0 + 2400)) B '' | strip); like "$out" '*· 5h ??:?? 61% ↯* · 7d ??? 41%' || bad=" [30 minutes on: $out]"
+out=$(lim $((T0 + 2401)) B '' | strip); { like "$out" '*· 5h ??:?? 61% ↯*' && ! has "$out" '· 7d'; } || bad="$bad [a second more: $out]"
+out=$(lim $((T0 + 3000)) B '' | strip); like "$out" '*· 5h ??:?? 61% ↯*' || bad="$bad [30 minutes after the rise: $out]"
+out=$(lim $((T0 + 3001)) B '' | strip); { has "$out" '· 5h' || has "$out" '· 7d'; } && bad="$bad [a second more: $out]"
+verdict a-shared-figure-lasts-30-minutes "$bad"
+# A window whose reset has passed is over: a new session draws none of it, not
+# even `5h reset`, which is for a session whose own window ran out.
+anew; bad=; t5=$((T0 + 900))
+lim $T0 A "$(pro 70 41)" >/dev/null
+out=$(lim $((T0 + 899)) B '' | strip); like "$out" '*· 5h ??:?? 70% · 7d ??? 41%' || bad=" [before the reset: $out]"
+out=$(lim $((T0 + 900)) B '' | strip); { like "$out" '*· 7d ??? 41%' && ! has "$out" '· 5h'; } || bad="$bad [at the reset: $out]"
+verdict a-shared-figure-ends-with-its-window "$bad"
+# It only reads the records, not even moving the `seen` an equal figure moves
+# every 5 minutes. B draws them at every render, yet they still lapse 30
+# minutes after A last saw them.
+anew; bad=; t5=$((T0 + 10800))
+lim $T0 A "$(pro 64 41)" >/dev/null; before=$(ondisk)
+for d in 60 400 1000 1500 1800; do
+  out=$(lim $((T0 + d)) B '' | strip); like "$out" '*· 5h ??:?? 64% · 7d ??? 41%' || bad="$bad [at +${d}s: $out]"
+done
+[ "$(ondisk)" = "$before" ] || bad="$bad [the files changed: $(ondisk | tr '\n' ' ')]"
+out=$(lim $((T0 + 1801)) B '' | strip); { has "$out" '· 5h' || has "$out" '· 7d'; } && bad="$bad [kept alive: $out]"
+verdict a-new-session-only-reads-the-records "$bad"
+# The gateway's cap the same way, from its own record: drawn as the gateway
+# session draws it, a time within a day and a date past one, gone 30 minutes
+# after that session last saw it or at its reset, and only read.
+anew; bad=
+for r in $((T0 + 3600)):'??:??' $((T0 + 200000)):'[0-3][0-9]/[A-Z][a-z][a-z]'; do
+  f=${r#*:} r=${r%%:*}
+  lim $T0 G "$(gw 85 "$r")" >/dev/null; before=$(ondisk)
+  a=$(lim $((T0 + 60)) G "$(gw 85 "$r")"); b=$(lim $((T0 + 60)) B '')
+  [ "$b" = "$a" ] || bad="$bad [B drew $(printf '%s' "$b" | strip), G $(printf '%s' "$a" | strip)]"
+  like "$(printf '%s' "$b" | strip)" "*· cap $f 85%" || bad="$bad [drew: $(printf '%s' "$b" | strip)]"
+  out=$(lim $((T0 + 1800)) B '' | strip); has "$out" '· cap ' || bad="$bad [30 minutes on: $out]"
+  [ "$(ondisk)" = "$before" ] || bad="$bad [the files changed]"
+  out=$(lim $((T0 + 1801)) B '' | strip); has "$out" '· cap' && bad="$bad [a second more: $out]"
+  anew
+done
+lim $T0 G "$(gw 85 $((T0 + 600)))" >/dev/null
+out=$(lim $((T0 + 599)) B '' | strip); like "$out" '*· cap ??:?? 85%' || bad="$bad [before the reset: $out]"
+out=$(lim $((T0 + 600)) B '' | strip); has "$out" '· cap' && bad="$bad [at the reset: $out]"
+verdict a-new-session-draws-the-gateway-cap-the-same-way "$bad"
+# A payload with limits of its own draws them alone, as before: a 5-hour window
+# brings no 7d from the record, a 7-day window no 5h, a gateway cap neither,
+# and an Enterprise seat none of them. Only a payload with no limits at all
+# draws the records.
+anew; bad=; t5=$((T0 + 10800)) t7=$((T0 + 300000))
+lim $T0 A "$(pro 64 41)" >/dev/null; lim $T0 G "$(gw 85 $((T0 + 3600)))" >/dev/null
+out=$(lim $((T0 + 60)) B '' | strip); like "$out" '*· 5h ??:?? 64% · 7d ??? 41% · cap ??:?? 85%' || bad=" [no limits: $out]"
+out=$(lim $((T0 + 60)) C '{"five_hour":{"used_percentage":64,"resets_at":'"$t5"'}}' | strip)
+{ like "$out" '*· 5h ??:?? 64%' && ! has "$out" '· 7d' && ! has "$out" '· cap'; } || bad="$bad [5-hour only: $out]"
+out=$(lim $((T0 + 60)) C '{"seven_day":{"used_percentage":41,"resets_at":'"$t7"'}}' | strip)
+{ like "$out" '*· 7d ??? 41%' && ! has "$out" '· 5h' && ! has "$out" '· cap'; } || bad="$bad [7-day only: $out]"
+out=$(lim $((T0 + 60)) C "$(gw 85 $((T0 + 3600)))" | strip)
+{ like "$out" '*· cap ??:?? 85%' && ! has "$out" '· 5h' && ! has "$out" '· 7d'; } || bad="$bad [gateway only: $out]"
+out=$(lim $((T0 + 60)) B '' CC_ENTERPRISE=1 | strip)
+{ has "$out" '· cap' && ! has "$out" '· 5h' && ! has "$out" '· 7d' && ! has "$out" '85%'; } || bad="$bad [Enterprise: $out]"
+verdict a-session-with-limits-of-its-own-is-unchanged "$bad"
+# Only before the session's first reply, while it has spent nothing. A session
+# that has spent something and still has no limits is on an API key, Bedrock or
+# Vertex, or was resumed with its cost carried over: it draws no window from
+# the records, however fresh. A cost of 0, as at the start, still draws them.
+anew; bad=; t5=$((T0 + 10800)) t7=$((T0 + 300000))
+lim $T0 A "$(pro 64 41)" >/dev/null
+spent() {  # spent <cost>: a render a minute on, with that cost and no limits
+  printf '{"session_id":"K","workspace":{"current_dir":"%s"},"cost":{"total_cost_usd":%s}}' "$W" "$1" \
+    | env PATH="$W/bin:$PATH" FAKE_NOW=$((T0 + 60)) HOME="$W/home" CC_WIDTH=0 LC_ALL=C "$shell" "$W/statusline.sh" | strip
+}
+for c in 0 0.0; do
+  out=$(spent $c); like "$out" '*· 5h ??:?? 64% · 7d ??? 41%' || bad="$bad [cost $c: $out]"
+done
+for c in 0.42 0.0001 1e-7; do
+  out=$(spent $c); { has "$out" '· 5h' || has "$out" '· 7d'; } && bad="$bad [cost $c: $out]"
+done
+verdict only-before-the-first-reply "$bad"
 rm -rf "$W"
 
 # --- plain ASCII ---
