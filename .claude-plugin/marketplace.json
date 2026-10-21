@@ -1,0 +1,12 @@
+{
+  "name": "budget-statusline",
+  "description": "One plugin: a Claude Code status line that shows the usage budget your account actually has, and when it runs out at your pace.",
+  "owner": { "name": "Dima Gusyatiner" },
+  "plugins": [
+    {
+      "name": "budget-statusline",
+      "source": "./",
+      "description": "A status line that tells you when your usage budget runs out at the pace you are going, next to the budget your account has, with the git branch, model, effort and context size."
+    }
+  ]
+}
