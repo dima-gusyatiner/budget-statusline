@@ -33,7 +33,7 @@ body:
     attributes:
       label: budget-statusline version
       description: Shown by `claude plugin list`, or the commit you installed from.
-      placeholder: 1.0.0
+      placeholder: 1.0.1
   - type: dropdown
     id: install
     attributes:

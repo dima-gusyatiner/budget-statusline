@@ -4,6 +4,12 @@ Notable changes to `budget-statusline`. The format follows [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-21
+
+### Fixed
+
+- A new session no longer starts without a budget. Until its first reply brings its own figures, it draws the 5-hour and 7-day windows, or a gateway's cap, that another session of the login has seen in the last 30 minutes, from the shared records, burn estimate included.
+
 ## [1.0.0] - 2026-10-21
 
 The first public release.
@@ -21,5 +27,6 @@ The first public release.
 - Install as a Claude Code plugin, or with `install.sh` on a machine without plugins. Neither overwrites a file it did not write or one you edited, and `install.sh --uninstall` removes only what they placed.
 - Runs on POSIX `sh`: macOS `/bin/sh`, `dash`, `bash`, and Git Bash on Windows. Needs `jq`, and `curl` for the usage endpoint only. Both test suites run on Linux, macOS and Windows.
 
-[Unreleased]: https://github.com/dima-gusyatiner/budget-statusline/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/dima-gusyatiner/budget-statusline/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/dima-gusyatiner/budget-statusline/releases/tag/v1.0.1
 [1.0.0]: https://github.com/dima-gusyatiner/budget-statusline/releases/tag/v1.0.0

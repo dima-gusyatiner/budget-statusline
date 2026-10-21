@@ -1,6 +1,6 @@
 {
   "name": "budget-statusline",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A Claude Code status line that tells you when your usage budget runs out at the pace you are going, next to the budget itself: the 5-hour and 7-day windows and, once they are full, the usage credits; an Enterprise monthly cap, a gateway spend cap, or the dollars spent with an API key. Fits narrow terminals.",
   "author": { "name": "Dima Gusyatiner" },
   "homepage": "https://github.com/dima-gusyatiner/budget-statusline",
