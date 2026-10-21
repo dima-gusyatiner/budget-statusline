@@ -1,0 +1,1 @@
+{"session_id":"t-sub","version":"2.1.236","model":{"display_name":"Opus 5 (1M context)"},"workspace":{"current_dir":"__CWD__"},"context_window":{"total_input_tokens":36400},"effort":{"level":"high"},"cost":{"total_cost_usd":0.5},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":__T1__},"seven_day":{"used_percentage":62.1,"resets_at":__T2__}}}
