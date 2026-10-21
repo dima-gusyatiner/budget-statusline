@@ -131,6 +131,44 @@ out=$(run enterprise.json);             check gate-off-default  "$out" '$0.80' "
 # the script has no refresher beside it, so it says so.
 out=$(run enterprise.json CC_ENTERPRISE=1); check gate-on-nocache "$out" '· cap no refresher' '$0.80'
 
+# Numbers in any locale. Under a comma-decimal locale the macOS shell's printf
+# rejects 23.5 and `awk` prints 12,40. The figures must still read 24%, 42% and
+# $2.50, through `LANG` and through `LC_ALL`, and the state files must keep a
+# point: a pace saved as 0,0022 is rejected by the next render, which then
+# starts the record over.
+de=; for l in de_DE.UTF-8 de_DE.utf8; do [ "$(LC_ALL=$l locale charmap 2>/dev/null)" = UTF-8 ] && { de=$l; break; }; done
+de_run() {  # de_run <payload> [VAR=value...]: one render with $v set to $de, in $L
+  p=$1; shift
+  sed -e "s|__CWD__|$here|" -e "s|__T1__|$((now+7200))|" -e "s|__T2__|$((now+200000))|" "$here/payloads/$p" \
+    | env -u LC_ALL -u LC_NUMERIC -u LC_CTYPE -u LANG HOME="$L" CC_WIDTH=0 "$v=$de" "$@" "$shell" "$L/statusline.sh" 2>>"$L/err" | strip
+}
+if [ -z "$de" ]; then
+  echo "ok   comma-locale-keeps-figures (skipped: no de_DE.UTF-8 locale here)"
+else
+  bad=
+  for v in LANG LC_ALL; do
+    L=$(mktemp -d); mkdir -p "$L/.claude"; cp "$sl" "$L/statusline.sh"; : > "$L/err"; now=$(date +%s)
+    # a record 1000 s old at 20%, so this render's 24% is a rise with a pace to save
+    printf '%s %s %s %s 20 0\n' $((now + 7200)) $((now - 1000)) $((now - 1000)) $((now - 1000)) > "$L/.claude/.rl-5h-state"
+    out=$(de_run subscription.json)
+    like "$out" '*ctx 36.4k · 5h ??:?? 24% · 7d * 62%' || bad="$bad [$v subscription: $out]"
+    set -- $(cat "$L/.claude/.rl-5h-state"); born=${2:-}
+    case "${6:-}" in ''|0|*,*) bad="$bad [$v pace: ${6:-}]" ;; esac
+    de_run subscription.json >/dev/null
+    set -- $(cat "$L/.claude/.rl-5h-state"); [ "${2:-}" = "$born" ] || bad="$bad [$v record started over]"
+    printf '{"fetched_at":%s,"spend_seen":0,"percent":42.3,"used_minor":8460,"limit_minor":20000,"severity":"ok"}\n' "$now" > "$L/.claude/.usage-cache.json"
+    has "$(de_run enterprise.json CC_ENTERPRISE=1)" '· cap ' || bad="$bad [$v enterprise: no cap]"
+    has "$(de_run enterprise.json CC_ENTERPRISE=1)" ' 42%' || bad="$bad [$v enterprise: no 42%]"
+    has "$(cat "$L/.claude/.usage-activity")" '#total 0.800000' || bad="$bad [$v activity: $(cat "$L/.claude/.usage-activity")]"
+    rm -f "$L/.claude/.usage-cache.json" "$L/.claude"/.rl-*
+    has "$(de_run apikey.json)" '· $2.50' || bad="$bad [$v ledger: $(de_run apikey.json)]"
+    has "$(cat "$L/.claude/.spend-ledger")" ' 2.5000' || bad="$bad [$v ledger file]"
+    [ -s "$L/err" ] && bad="$bad [$v stderr: $(head -2 "$L/err")]"
+    rm -rf "$L"
+  done
+  verdict comma-locale-keeps-figures "$bad"
+fi
+
 # A field of the wrong type (an array, an object, a string where an object
 # belongs) leaves that field empty and the rest of the line intact, quietly.
 H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"; bad=

@@ -56,6 +56,18 @@ if [ -n "$asc" ]; then
 else
   SEP=" ${DIM}·${Z} " ELL=… KEEP=12 DIRTY=✗ CLEAN=✓ FOLDER=⌂ EFFORT=◊ CREDIT=¤ BURN=↯
 fi
+# Numbers in C notation, whatever the locale. Under a comma-decimal locale
+# (`de_DE`, `fr_FR`, `ru_RU`) the macOS shell's `printf` rejects 23.5 and `awk`
+# prints 12,40: figures would vanish, and the state files would hold numbers the
+# next render rejects. `LC_ALL` outranks `LC_NUMERIC`, so it moves into the
+# categories the line uses (characters, sorting, dates, messages), and only the
+# numbers go to C. This runs after the guess above, which reads the locale as
+# Claude Code passed it.
+if [ -n "${LC_ALL:-}" ]; then
+  LC_CTYPE=$LC_ALL LC_COLLATE=$LC_ALL LC_TIME=$LC_ALL LC_MESSAGES=$LC_ALL
+  export LC_CTYPE LC_COLLATE LC_TIME LC_MESSAGES; unset LC_ALL
+fi
+LC_NUMERIC=C; export LC_NUMERIC
 now=$(date +%s)
 # The login's config folder: `CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
 # Every state file lives there, so two logins on one machine never share one.
