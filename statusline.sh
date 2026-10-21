@@ -45,17 +45,20 @@ case "${CC_ASCII:-}" in
      fi ;;
 esac
 # `SEP` between groups, `ELL` for a name cut short (after `KEEP` characters) and
-# then the marks for a dirty and a clean tree, a folder outside git and the
-# effort.
+# then the marks for a dirty and a clean tree, a folder outside git, the effort
+# and the burn estimate.
 if [ -n "$asc" ]; then
-  SEP=" ${DIM}|${Z} " ELL=.. KEEP=11 DIRTY='*' CLEAN= FOLDER= EFFORT=
+  SEP=" ${DIM}|${Z} " ELL=.. KEEP=11 DIRTY='*' CLEAN= FOLDER= EFFORT= BURN='~'
 else
-  SEP=" ${DIM}·${Z} " ELL=… KEEP=12 DIRTY=✗ CLEAN=✓ FOLDER=⌂ EFFORT=◊
+  SEP=" ${DIM}·${Z} " ELL=… KEEP=12 DIRTY=✗ CLEAN=✓ FOLDER=⌂ EFFORT=◊ BURN=↯
 fi
 now=$(date +%s)
 # The login's config folder: `CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
 # Every state file lives there, so two logins on one machine never share one.
 CLAUDE=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+
+# `sh` has no `local`, so the longer functions prefix their working variables
+# (`r_`) to keep clear of the globals.
 
 # at <epoch> <format>: the time in the local zone, by BSD `date -r`, else GNU
 # `date -d @`. Empty for anything but a whole epoch.
@@ -181,34 +184,169 @@ if [ "$tok" -gt 0 ] 2>/dev/null; then
   fi
 fi
 
+# --- one record per window, shared by every session of this login ---
+# A session only hears the replies to its own requests, so an idle one keeps
+# showing the figures it heard last. The record keeps what all of them have
+# seen of one window, as one line in `.rl-<key>-state` in the config folder:
+#   <window> <born> <rose> <seen> <percent> <pace>
+# A window is its key (`5h`, `7d`, `gateway`, `ledger`) plus its reset time. A
+# reset time more than 10 minutes later starts a new record; within 10 minutes
+# it is the same window, whatever the percentage does. An earlier one is a
+# session still on the last window, and it leaves the record alone. While its
+# window lasts it draws its own figure; once that window is over, the record's
+# newer one. A window whose reset time has passed, with no newer one known,
+# reads "5h reset" in dim until a reply brings the new window: its old figure no
+# longer counts, and its old stamp would read as the next reset.
+# Within a window usage only goes up: a higher figure raises the record, a lower
+# one is an older reading and never lowers it. `seen` is the last time a
+# session's own figure reached the record's. While that is under 30 minutes
+# ago, a session whose own figure is lower draws the record's; past that, its
+# own, which is how a figure the server lowers gets in.
+# The burn estimate comes from the record's rises: `pace`, in points a second,
+# is an exponentially weighted moving average of them. A rise counts in full
+# when it comes and fades with time constant `tau`, 30 minutes on the 5-hour
+# window and a day on the longer ones, both picked by simulating several
+# methods on synthetic usage. It is never restarted within a window, so it does
+# not go blank. The first 2 minutes of a record only raise it: every open
+# session draws in that time, and a record born from an idle session's old
+# figure would read the others catching up as a burst. The estimate waits until
+# the pace is 5 minutes old: 7 minutes into a record.
+
+# record <key> <percent> <window>: the figure to draw in `$rf` and its window in
+# `$rw`, the burn estimate in `$bt` (" ↯25m", dim or red, or nothing). The
+# window is a reset time, or a name for a period (the local ledger, which has
+# none).
+record() {
+  rf=$2 rw=$3 bt= r_st="$CLAUDE/.rl-$1-state" r_k=$1 r_p=$2 r_w=$3 r_rise=0 r_wr=
+  case "$r_p" in ''|*[!0-9]*) return ;; esac
+  case "$r_w" in ''|0*|*[!0-9A-Za-z]*) return ;; esac
+  # seconds to the reset, for a window that is a reset time; none for a name
+  r_l=; case "$r_w" in *[!0-9]*) ;; *) r_l=$((r_w - now)) ;; esac
+  fields "$r_st"
+  if [ -n "$r_ok" ]; then
+    case "$r_W$r_w" in
+      *[!0-9]*) [ "$r_W" = "$r_w" ] || r_ok= ;;
+      *) [ $((r_w - r_W)) -gt 600 ] && r_ok=
+         if [ $((r_w - r_W)) -lt -600 ]; then
+           [ "$r_w" -gt "$now" ] || rf=$r_P rw=$r_W    # over: the newer window
+           return
+         fi ;;
+    esac
+    # a time from the future: the clock moved back, so the record cannot be read
+    { [ "$r_T" -gt $((now + 60)) ] || [ "$r_S" -gt $((now + 60)) ]; } && r_ok=
+  fi
+  if [ -z "$r_ok" ]; then
+    keep "$r_st" "$r_w $now $now $now $r_p 0"
+    return
+  fi
+  if [ "$r_p" -gt "$r_P" ]; then
+    [ $((now - r_B)) -ge 120 ] && r_rise=$((r_p - r_P))
+    [ "$r_rise" -gt 0 ] || r_T=$now
+    r_W=$r_w r_P=$r_p r_S=$now r_wr=1
+  elif [ "$r_p" -eq "$r_P" ]; then
+    # seen moves on at most every 5 minutes: a write on every render would cost
+    # a process each time, and the 30 minutes do not need it
+    [ $((now - r_S)) -ge 300 ] && r_S=$now r_wr=1
+  elif [ $((now - r_S)) -le 1800 ]; then
+    rf=$r_P
+  else
+    return
+  fi
+  estimate
+  # a rise the maths could not take in is not written, so the next render has it
+  if [ "$r_rise" -gt 0 ]; then
+    if [ -n "$r_e" ]; then r_E=$r_e r_T=$now; else r_wr=; fi
+  fi
+  [ -n "$r_wr" ] && keep "$r_st" "$r_W $r_B $r_T $r_S $r_P $r_E"
+  burnmark
+}
+# fields <file>: a record's fields into `$r_W`, `$r_B`, `$r_T`, `$r_S`, `$r_P`
+# and `$r_E`, with `$r_ok` set when all of them are well formed. Every field is
+# checked: arithmetic reads `08` as bad octal, which ends the script under
+# `dash`, and anything else would be a guess.
+fields() {
+  r_W= r_B= r_T= r_S= r_P= r_E= r_ok=1
+  [ -r "$1" ] && read -r r_W r_B r_T r_S r_P r_E _ 2>/dev/null < "$1"
+  for r_f in "$r_B" "$r_T" "$r_S" "$r_P"; do
+    case "$r_f" in 0) ;; ''|0*|*[!0-9]*) r_ok= ;; esac
+  done
+  case "$r_W" in ''|0*|*[!0-9A-Za-z]*) r_ok= ;; esac
+  case "$r_E" in ''|*[!0-9.e+-]*) r_ok= ;; esac
+}
+# estimate: the record's pace after this render in `$r_e`, and when the estimate
+# shows, the time to 100% in `$r_eta` ("25m", "1.2h") and 1 in `$r_red` when that
+# comes before the reset. It reads `$r_k`, `$rf`, `$r_B`, `$r_T`, `$r_E`,
+# `$r_l` and `$r_rise`, as `record` leaves them.
+# Shown from 50% on the 5-hour window and 70% on longer ones, below 100%, once
+# the pace is 5 minutes old, and never for a window whose reset has passed:
+# `window()` draws no estimate for one, and leaving `r_show` empty there spares
+# the `awk` call below on every render until the next window arrives. One `awk`
+# call does the maths and the time format.
+estimate() {
+  case "$r_k" in 5h) r_tau=1800 r_gate=50 ;; *) r_tau=86400 r_gate=70 ;; esac
+  r_show=
+  [ "$rf" -ge "$r_gate" ] && [ "$rf" -lt 100 ] && [ $((now - r_B)) -ge 420 ] &&
+    { [ -z "$r_l" ] || [ "$r_l" -gt 0 ]; } && r_show=1
+  r_e= r_eta= r_red=
+  [ "$r_rise" -gt 0 ] || { [ -n "$r_show" ] && [ "$r_E" != 0 ]; } || return 0
+  set -- $(awk -v e="$r_E" -v dt=$((now - r_T)) -v age=$((now - r_B - 120)) -v tau="$r_tau" \
+               -v rise="$r_rise" -v cur="$rf" -v show="$r_show" -v left="$r_l" 'BEGIN {
+    if (dt < 0) dt = 0
+    e = e * exp(-dt / tau) + rise / tau
+    printf "%.6g", e
+    if (show == "" || e <= 0) exit
+    eta = int((100 - cur) / (e / (1 - exp(-age / tau))))
+    if (eta < 3600) printf " %dm", int((eta + 59) / 60); else printf " %.1fh", eta / 3600
+    printf " %d", (left != "" && eta < left + 0)
+  }' 2>/dev/null)
+  r_e=${1:-} r_eta=${2:-} r_red=${3:-}
+}
+# burnmark: the estimate as it is drawn, in `$bt`: " ↯25m", dim, or red when the
+# window would fill before its reset; nothing when there is no estimate
+burnmark() {
+  bt=; [ -n "$r_eta" ] || return 0
+  r_c=$DIM; [ "$r_red" = 1 ] && r_c=$RED
+  bt=" ${r_c}${BURN}$r_eta${Z}"
+}
+# keep <file> <text>: the text into the file, through a temporary file so no
+# reader sees it half written. False when it could not be written.
+keep() {
+  printf '%s\n' "$2" 2>/dev/null > "$1.$$" && mv -f "$1.$$" "$1" 2>/dev/null && return 0
+  rm -f "$1.$$" 2>/dev/null; return 1
+}
+
 # Budget items collect three times over: `$sb` in full with a dot between items,
 # `$sbs` the same with a space, and `$sb1` bare: the label and the figure,
-# without the reset stamp or the dollars.
+# without the reset stamp, the burn estimate or the dollars.
 # add <full> [bare]: an item with no shorter form passes one argument
 sb= sbs= sb1=
 add() { sb="${sb:+$sb$SEP}$1"; sbs="${sbs:+$sbs }$1"; sb1="${sb1:+$sb1 }${2:-$1}"; }
 
-# window <pct> <resets_at> <label> <time-format>: one window as a budget item.
-# The label carries its own trailing space ("5h "), so the bare form reads
-# 5h 24%.
+# window <pct> <resets_at> <label> <time-format> <state-key>: one window as a
+# budget item. The label carries its own trailing space ("5h "), so the bare
+# form reads 5h 24%.
 window() {
+  rw=$2
   p=$(printf '%.0f' "$1" 2>/dev/null) || return
   [ "$p" -lt 0 ] && return                            # a negative figure is garbage
   stamp=$(at "$2" "$4")
+  record "$5" "$p" "$2"; p=$rf
+  case "$rw" in ''|*[!0-9]*) ;; *) [ "$rw" -gt "$now" ] || { add "${DIM}$3reset${Z}"; return 0; } ;; esac
+  [ "$rw" = "$2" ] || stamp=$(at "$rw" "$4")         # the record's newer window
   ramp "$p"
-  add "${R}$3${stamp:+$stamp }${p}%${Z}" "${R}$3${p}%${Z}"
+  add "${R}$3${stamp:+$stamp }${p}%${Z}${bt}" "${R}$3${p}%${Z}"
 }
 
 # --- 5. budget: always shown, colour carries severity, no threshold gating ---
-[ -n "$p5" ] && window "$p5" "$r5" "5h " "%H:%M"   # 5-hour window
-[ -n "$p7" ] && window "$p7" "$r7" "7d " "%a"      # 7-day window
+[ -n "$p5" ] && window "$p5" "$r5" "5h " "%H:%M" 5h   # 5-hour window
+[ -n "$p7" ] && window "$p7" "$r7" "7d " "%a"    7d   # 7-day window
 if [ -n "$ps" ]; then                                  # gateway spend cap
   # Arithmetic on a reset time that is not a whole epoch (1792730959.5, an ISO
   # date) would end the script and blank the line. Such a time gets no stamp.
   fmt=%H:%M
   # The time when the reset is within a day, else the date.
   case "$rs" in ''|*[!0-9]*) ;; *) [ $((rs - now)) -gt 86400 ] && fmt=%d/%b ;; esac
-  window "$ps" "$rs" "cap " "$fmt"
+  window "$ps" "$rs" "cap " "$fmt" gateway
 elif [ -z "$p5" ]; then
   # No limits in the payload (API key, Bedrock, Vertex). Claude Code only
   # reports this session's estimated cost, all it has spent since it started,
@@ -243,8 +381,11 @@ elif [ -z "$p5" ]; then
   money=$(awk -v s="$sum" 'BEGIN { printf "%.2f", s }')
   if [ -n "$cap" ]; then
     p=$(awk -v s="$sum" -v c="$cap" 'BEGIN { printf "%d", s / c * 100 }')
+    # The ledger has no reset time, so its period names the window, in a record
+    # of its own. With no reset to beat, its estimate is never red.
+    record ledger "$p" "l$pk"; p=$rf
     ramp "$p"
-    add "${R}\$${money}/${cap} ${p}%${Z}" "${R}cap ${p}%${Z}"
+    add "${R}\$${money}/${cap} ${p}%${Z}${bt}" "${R}cap ${p}%${Z}"
   elif [ "$money" != "0.00" ]; then
     add "\$${money}"
   fi
