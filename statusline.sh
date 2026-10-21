@@ -299,15 +299,7 @@ record() {
   case "$r_w" in ''|0*|*[!0-9A-Za-z]*) return ;; esac
   # seconds to the reset, for a window that is a reset time; none for a name
   r_l=; case "$r_w" in *[!0-9]*) ;; *) r_l=$((r_w - now)) ;; esac
-  r_W= r_B= r_T= r_S= r_P= r_E= r_ok=1
-  [ -r "$r_st" ] && read -r r_W r_B r_T r_S r_P r_E _ 2>/dev/null < "$r_st"
-  # Every field is checked: arithmetic reads `08` as bad octal, which ends the
-  # script under `dash`, and anything else would be a guess.
-  for r_f in "$r_B" "$r_T" "$r_S" "$r_P"; do
-    case "$r_f" in 0) ;; ''|0*|*[!0-9]*) r_ok= ;; esac
-  done
-  case "$r_W" in ''|0*|*[!0-9A-Za-z]*) r_ok= ;; esac
-  case "$r_E" in ''|*[!0-9.e+-]*) r_ok= ;; esac
+  fields "$r_st"
   if [ -n "$r_ok" ]; then
     case "$r_W$r_w" in
       *[!0-9]*) [ "$r_W" = "$r_w" ] || r_ok= ;;
@@ -337,37 +329,59 @@ record() {
   else
     return
   fi
-  # Shown from 50% on the 5-hour window and 70% on longer ones, below 100%, once
-  # the pace is 5 minutes old, and never for a window whose reset has passed:
-  # `window()` draws no estimate for one, and leaving `r_show` empty there spares
-  # the `awk` call below on every render until the next window arrives. One
-  # `awk` call does the maths and the time format.
+  estimate
+  # a rise the maths could not take in is not written, so the next render has it
+  if [ "$r_rise" -gt 0 ]; then
+    if [ -n "$r_e" ]; then r_E=$r_e r_T=$now; else r_wr=; fi
+  fi
+  [ -n "$r_wr" ] && keep "$r_st" "$r_W $r_B $r_T $r_S $r_P $r_E"
+  burnmark
+}
+# fields <file>: a record's fields into `$r_W`, `$r_B`, `$r_T`, `$r_S`, `$r_P`
+# and `$r_E`, with `$r_ok` set when all of them are well formed. Every field is
+# checked: arithmetic reads `08` as bad octal, which ends the script under
+# `dash`, and anything else would be a guess.
+fields() {
+  r_W= r_B= r_T= r_S= r_P= r_E= r_ok=1
+  [ -r "$1" ] && read -r r_W r_B r_T r_S r_P r_E _ 2>/dev/null < "$1"
+  for r_f in "$r_B" "$r_T" "$r_S" "$r_P"; do
+    case "$r_f" in 0) ;; ''|0*|*[!0-9]*) r_ok= ;; esac
+  done
+  case "$r_W" in ''|0*|*[!0-9A-Za-z]*) r_ok= ;; esac
+  case "$r_E" in ''|*[!0-9.e+-]*) r_ok= ;; esac
+}
+# estimate: the record's pace after this render in `$r_e`, and when the estimate
+# shows, the time to 100% in `$r_eta` ("25m", "1.2h") and 1 in `$r_red` when that
+# comes before the reset. It reads `$r_k`, `$rf`, `$r_B`, `$r_T`, `$r_E`,
+# `$r_l` and `$r_rise`, as `record` leaves them.
+# Shown from 50% on the 5-hour window and 70% on longer ones, below 100%, once
+# the pace is 5 minutes old, and never for a window whose reset has passed:
+# `window()` draws no estimate for one, and leaving `r_show` empty there spares
+# the `awk` call below on every render until the next window arrives. One `awk`
+# call does the maths and the time format.
+estimate() {
   case "$r_k" in 5h) r_tau=1800 r_gate=50 ;; *) r_tau=86400 r_gate=70 ;; esac
   r_show=
   [ "$rf" -ge "$r_gate" ] && [ "$rf" -lt 100 ] && [ $((now - r_B)) -ge 420 ] &&
     { [ -z "$r_l" ] || [ "$r_l" -gt 0 ]; } && r_show=1
-  # `awk` prints the new pace, then, when the estimate shows, the time to 100%
-  # ("25m", "1.2h") and 1 when that comes before the reset
   r_e= r_eta= r_red=
-  if [ "$r_rise" -gt 0 ] || { [ -n "$r_show" ] && [ "$r_E" != 0 ]; }; then
-    set -- $(awk -v e="$r_E" -v dt=$((now - r_T)) -v age=$((now - r_B - 120)) -v tau="$r_tau" \
-                 -v rise="$r_rise" -v cur="$rf" -v show="$r_show" -v left="$r_l" 'BEGIN {
-      if (dt < 0) dt = 0
-      e = e * exp(-dt / tau) + rise / tau
-      printf "%.6g", e
-      if (show == "" || e <= 0) exit
-      eta = int((100 - cur) / (e / (1 - exp(-age / tau))))
-      if (eta < 3600) printf " %dm", int((eta + 59) / 60); else printf " %.1fh", eta / 3600
-      printf " %d", (left != "" && eta < left + 0)
-    }' 2>/dev/null)
-    r_e=${1:-} r_eta=${2:-} r_red=${3:-}
-    # a rise the maths could not take in is not written, so the next render has it
-    if [ "$r_rise" -gt 0 ]; then
-      if [ -n "$r_e" ]; then r_E=$r_e r_T=$now; else r_wr=; fi
-    fi
-  fi
-  [ -n "$r_wr" ] && keep "$r_st" "$r_W $r_B $r_T $r_S $r_P $r_E"
-  [ -n "$r_eta" ] || return 0
+  [ "$r_rise" -gt 0 ] || { [ -n "$r_show" ] && [ "$r_E" != 0 ]; } || return 0
+  set -- $(awk -v e="$r_E" -v dt=$((now - r_T)) -v age=$((now - r_B - 120)) -v tau="$r_tau" \
+               -v rise="$r_rise" -v cur="$rf" -v show="$r_show" -v left="$r_l" 'BEGIN {
+    if (dt < 0) dt = 0
+    e = e * exp(-dt / tau) + rise / tau
+    printf "%.6g", e
+    if (show == "" || e <= 0) exit
+    eta = int((100 - cur) / (e / (1 - exp(-age / tau))))
+    if (eta < 3600) printf " %dm", int((eta + 59) / 60); else printf " %.1fh", eta / 3600
+    printf " %d", (left != "" && eta < left + 0)
+  }' 2>/dev/null)
+  r_e=${1:-} r_eta=${2:-} r_red=${3:-}
+}
+# burnmark: the estimate as it is drawn, in `$bt`: " ↯25m", dim, or red when the
+# window would fill before its reset; nothing when there is no estimate
+burnmark() {
+  bt=; [ -n "$r_eta" ] || return 0
   r_c=$DIM; [ "$r_red" = 1 ] && r_c=$RED
   bt=" ${r_c}${BURN}$r_eta${Z}"
 }
