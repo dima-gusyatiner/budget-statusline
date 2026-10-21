@@ -1,4 +1,9 @@
 #!/bin/sh
+# A Claude Code status line: git · model effort · context · budget.
+# A window segment is <label> <when it resets> <pct>%, drawn at 0% too, and
+# colour alone carries severity. Which segments appear depends on the account:
+#   subscription       5h 20:57 24%, 7d Thu 62%  `rate_limits` in the payload
+#   gateway spend cap  cap 23/Oct 78%            `rate_limits.spend_limit`
 command -v jq >/dev/null 2>&1 || { printf 'statusline: jq not installed'; exit 0; }
 # Every JSON file this reads goes through `jq` into an `eval` of `@sh`, and every
 # field through `v(path; default)` from `$JV`, which keeps a field only when it
@@ -11,7 +16,7 @@ command -v jq >/dev/null 2>&1 || { printf 'statusline: jq not installed'; exit 0
 # link early in a terminal that honours them.
 JV='def s: if type == "string" then explode | map(select(. >= 32 and (. < 127 or . > 159))) | implode elif type == "number" then . else empty end; def v(f; d): [f? | s][0] // d;'
 # One `jq` call reads every field of the payload, straight from stdin.
-eval "$(jq -r "$JV"' @sh "cwd=\(v(.workspace.current_dir; v(.cwd; ""))) mdl=\(v(.model.display_name; "")) eff=\(v(.effort.level; "")) tok=\(v(.context_window.total_input_tokens; 0)) ctxp=\(v(.context_window.used_percentage; ""))"' 2>/dev/null)"
+eval "$(jq -r "$JV"' @sh "cwd=\(v(.workspace.current_dir; v(.cwd; ""))) mdl=\(v(.model.display_name; "")) eff=\(v(.effort.level; "")) tok=\(v(.context_window.total_input_tokens; 0)) ctxp=\(v(.context_window.used_percentage; "")) p5=\(v(.rate_limits.five_hour.used_percentage; "")) r5=\(v(.rate_limits.five_hour.resets_at; "")) p7=\(v(.rate_limits.seven_day.used_percentage; "")) r7=\(v(.rate_limits.seven_day.resets_at; "")) ps=\(v(.rate_limits.spend_limit.used_percentage; "")) rs=\(v(.rate_limits.spend_limit.resets_at; ""))"' 2>/dev/null)"
 
 [ -n "$cwd" ] || cwd=$PWD
 # Colours are plain variables built from one escape character. A `$(...)` per
@@ -23,9 +28,17 @@ MAG="${E}[35m" CYN="${E}[36m" BLU="${E}[1;34m"
 # `SEP` between groups, then the marks for a dirty and a clean tree, a
 # folder outside git and the effort.
 SEP=" ${DIM}·${Z} " DIRTY=✗ CLEAN=✓ FOLDER=⌂ EFFORT=◊
+now=$(date +%s)
 
+# at <epoch> <format>: the time in the local zone, by BSD `date -r`, else GNU
+# `date -d @`. Empty for anything but a whole epoch.
+at() { case "$1" in ''|*[!0-9]*) return;; esac
+  date -r "$1" +"$2" 2>/dev/null || date -d "@$1" +"$2" 2>/dev/null; }
 # ramp <percent>: its colour, in `$R`: green under 50, yellow from 50, red from 80
 ramp() { if [ "$1" -ge 80 ]; then R=$RED; elif [ "$1" -ge 50 ]; then R=$YEL; else R=$GRN; fi; }
+
+# The line is put together at the very end, out of one variable per group:
+# `sg` git, `sm` model and effort, `sc` context, `sb` budget.
 
 # clean <text>: the text without control characters, left in `$clean`. A folder,
 # model or effort name is printed as it is, and an escape or a BEL in it could
@@ -89,8 +102,33 @@ if [ "$tok" -gt 0 ] 2>/dev/null; then
   fi
 fi
 
+sb=
+add() { sb="${sb:+$sb$SEP}$1"; }
+
+# window <pct> <resets_at> <label> <time-format>: one window as a budget item.
+# The label carries its own trailing space ("5h ").
+window() {
+  p=$(printf '%.0f' "$1" 2>/dev/null) || return
+  [ "$p" -lt 0 ] && return                            # a negative figure is garbage
+  stamp=$(at "$2" "$4")
+  ramp "$p"
+  add "${R}$3${stamp:+$stamp }${p}%${Z}"
+}
+
+# --- 5. budget: always shown, colour carries severity, no threshold gating ---
+[ -n "$p5" ] && window "$p5" "$r5" "5h " "%H:%M"   # 5-hour window
+[ -n "$p7" ] && window "$p7" "$r7" "7d " "%a"      # 7-day window
+if [ -n "$ps" ]; then                                  # gateway spend cap
+  # Arithmetic on a reset time that is not a whole epoch (1792730959.5, an ISO
+  # date) would end the script and blank the line. Such a time gets no stamp.
+  fmt=%H:%M
+  # The time when the reset is within a day, else the date.
+  case "$rs" in ''|*[!0-9]*) ;; *) [ $((rs - now)) -gt 86400 ] && fmt=%d/%b ;; esac
+  window "$ps" "$rs" "cap " "$fmt"
+fi
+
 # join <separator> <group>...: the groups that are not empty, in `$line`
 join() { j=$1; shift; line=; for s in "$@"; do [ -n "$s" ] && line="${line:+$line$j}$s"; done; }
 
-join "$SEP" "$sg" "$sm" "$sc"; full=$line
+join "$SEP" "$sg" "$sm" "$sc" "$sb"; full=$line
 printf '%s' "$full"
