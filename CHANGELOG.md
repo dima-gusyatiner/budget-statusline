@@ -4,7 +4,7 @@ Notable changes to `budget-statusline`. The format follows [Keep a Changelog](ht
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-10-22
+## [1.0.0] - 2026-10-21
 
 The first public release.
 
