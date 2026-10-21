@@ -1,0 +1,36 @@
+name: Feature request
+description: Something the line should show or do.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The line stays one line, and the scripts stay POSIX `sh` with `jq`, `git` and `curl`. A request that needs more may be declined, with the reason.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you want to see or do
+      description: The situation, not the solution yet. What do you look at the line for, and what is missing?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What the line could do
+      description: If you have an idea, how it would look on the line.
+  - type: dropdown
+    id: account
+    attributes:
+      label: Account type it is for
+      multiple: true
+      options:
+        - Claude Pro or Max
+        - Enterprise, usage-based seat
+        - Team or Enterprise, another kind of seat
+        - Claude apps gateway with a spend limit
+        - API key, Amazon Bedrock or Google Vertex AI
+        - Any
+  - type: textarea
+    id: today
+    attributes:
+      label: What you use today instead
