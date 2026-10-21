@@ -1,0 +1,57 @@
+name: tests
+
+# Runs both suites on each system the scripts support: Linux, where `sh` is
+# `dash` and the tools are GNU (once under `dash`, once under `bash`); macOS,
+# where `sh` is `bash` 3.2 in POSIX mode and the tools are BSD; and Windows,
+# where everything goes through Git Bash.
+#
+# On Windows the hook and installer suite skips its file mode and symbolic link
+# checks, with a line for each, and expects the `bash` prefix the installers
+# write into the command there.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "Linux, dash",       os: ubuntu-latest,  shell: dash }
+          - { name: "Linux, bash",       os: ubuntu-latest,  shell: bash }
+          - { name: "macOS, sh",         os: macos-latest,   shell: sh }
+          - { name: "Windows, Git Bash", os: windows-latest, shell: sh }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tools on this runner
+        run: |
+          uname -a
+          for t in sh "${{ matrix.shell }}" jq git curl awk sed; do
+            printf '%s: ' "$t"; command -v "$t" || { echo MISSING; exit 1; }
+          done
+          jq --version
+      # The suite checks the figures under a comma-decimal locale and prints a
+      # skip line where that locale is missing, as it is on a stock Linux runner.
+      - name: A comma-decimal locale
+        if: runner.os == 'Linux'
+        run: sudo locale-gen de_DE.UTF-8 || echo "no de_DE.UTF-8 here, the locale check will skip"
+      - name: Statusline and refresh script
+        run: SL_SHELL=${{ matrix.shell }} sh tests/run.sh
+      - name: Hook and installer
+        if: ${{ !cancelled() }}
+        run: SL_SHELL=${{ matrix.shell }} sh tests/test-deploy.sh

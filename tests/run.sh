@@ -199,7 +199,7 @@ check enterprise-latch "$out" "42%" '$0.80'
 # The reset date comes out of `monthreset()`, which needs plain POSIX arithmetic:
 # bash takes `10#$m` and dash rejects it, and the checks above would still pass
 # under dash with the date gone. So this one wants the date and a silent
-# stderr.
+# stderr. CI runs the whole suite under dash and under bash.
 H=$(mktemp -d); mkdir -p "$H/.claude"; now=$(date +%s)
 printf '{"fetched_at":%s,"spend_seen":0,"percent":42.3,"used_minor":8460,"limit_minor":20000,"severity":"ok"}\n' "$now" > "$H/.claude/.usage-cache.json"
 cp "$sl" "$H/statusline.sh"
