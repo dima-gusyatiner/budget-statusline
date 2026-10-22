@@ -4,6 +4,14 @@ Notable changes to `budget-statusline`. The format follows [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-22
+
+### Changed
+
+- The burn estimate keeps a decimal only under 10 hours: `↯25m`, `↯4.5h`, `↯36h`, `↯2d`. Each step rounds down, so it never reads `60m`, `10.0h` or `48h`.
+- A figure from the usage endpoint no longer carries its age: `cap 01/Nov 91%`, not `cap 01/Nov 91%…13m`. A failed refresh still shows its reason beside the figure, and a figure too old to trust is still replaced.
+- A figure too old to draw reads `cap 2h-stale`, one word, instead of `cap stale 2h`.
+
 ## [1.0.0] - 2026-10-21
 
 The first public release.
@@ -21,5 +29,6 @@ The first public release.
 - Install as a Claude Code plugin, or with `install.sh` on a machine without plugins. Neither overwrites a file it did not write or one you edited, and `install.sh --uninstall` removes only what they placed.
 - Runs on POSIX `sh`: macOS `/bin/sh`, `dash`, `bash`, and Git Bash on Windows. Needs `jq`, and `curl` for the usage endpoint only. Both test suites run on Linux, macOS and Windows.
 
-[Unreleased]: https://github.com/dima-gusyatiner/budget-statusline/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/dima-gusyatiner/budget-statusline/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/dima-gusyatiner/budget-statusline/releases/tag/v1.0.1
 [1.0.0]: https://github.com/dima-gusyatiner/budget-statusline/releases/tag/v1.0.0
