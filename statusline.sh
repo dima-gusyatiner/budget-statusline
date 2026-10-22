@@ -49,7 +49,7 @@ case "${CC_ASCII:-}" in
      fi ;;
 esac
 # `SEP` between groups, `ELL` for a name cut short (after `KEEP` characters) and
-# for the age of an old figure, then the marks for a dirty and a clean tree, a
+# for a figure on its way, then the marks for a dirty and a clean tree, a
 # folder outside git, the effort, the usage credits and the burn estimate.
 if [ -n "$asc" ]; then
   SEP=" ${DIM}|${Z} " ELL=.. KEEP=11 DIRTY='*' CLEAN= FOLDER= EFFORT= CREDIT=+ BURN='~'
@@ -423,15 +423,12 @@ keep() {
 
 # Budget items collect three times over: `$sb` in full with a dot between items,
 # `$sbs` the same with a space, and `$sb1` bare: the label and the figure,
-# without the reset stamp, the burn estimate or the dollars. An old figure keeps
-# its age even there: without it, it would read as current.
+# without the reset stamp, the burn estimate or the dollars.
 # add <full> [bare]: an item with no shorter form passes one argument
-# more <text>: more of the last item, in all three forms (an age, a reason)
+# more <text>: more of the last item, in all three forms (a reason)
 sb= sbs= sb1=
 add() { sb="${sb:+$sb$SEP}$1"; sbs="${sbs:+$sbs }$1"; sb1="${sb1:+$sb1 }${2:-$1}"; }
 more() { sb="$sb$1"; sbs="$sbs$1"; sb1="$sb1$1"; }
-# addage <seconds>: the age of the figure drawn last, "…33m", in all three forms
-addage() { more "${DIM}${ELL}$(agefmt "$1")${Z}"; }
 
 # window <pct> <resets_at> <label> <time-format> <state-key> [mid] [shared]: one
 # window as a budget item, with the figure drawn left in `$p` and its window in
@@ -650,8 +647,6 @@ credits() {
   else
     add "${DIM}${CREDIT}${Z}${cr_m}"
   fi
-  # An old figure keeps its age, in the narrowest form too.
-  [ "$cr_age" -ge 600 ] && addage "$cr_age"
   beside "$cr_t"
 }
 
@@ -765,8 +760,8 @@ elif [ -z "$p5" ] && [ -n "$ent" ]; then
   # unknown beats a confident wrong number, such as a 100% for a cap that has
   # since reset.
   # A 429 is the server asking for quiet, not a broken figure, so the last one
-  # stays for at least an hour, stamped with its age and "throttled". Claude
-  # Code's own /usage keeps its last figure too when the endpoint refuses it.
+  # stays for at least an hour, with "throttled" beside it. Claude Code's own
+  # /usage keeps its last figure too when the endpoint refuses it.
   drop=$((floor * 3))
   [ "$why" = throttled ] && [ "$drop" -lt 3600 ] && drop=3600
   [ "$cage" -gt "$drop" ] && cp=
@@ -787,7 +782,6 @@ elif [ -z "$p5" ] && [ -n "$ent" ]; then
     # only with `CC_SPEND_DOLLARS` set, and not set to 0.
     dol=; case "${CC_SPEND_DOLLARS:-0}" in 0) ;; *) [ -n "$cu" ] && [ -n "$cl" ] && dol="$(money "$cu" USD)/$((cl / 100))" ;; esac
     window "$cp" "$mr" "cap " "%d/%b" spend "$dol" shared
-    [ "$cage" -ge "$floor" ] && addage "$cage"
     beside "$cts"
   else
     # No figure to draw: a snapshot too old, or none yet. Say why, or how old the

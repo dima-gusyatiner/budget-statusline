@@ -341,9 +341,12 @@ snap 60 91; ent >/dev/null; snap 60 45; bad=
 has "$(ent)" '45%' || bad=" [the lower figure was not drawn]"
 verdict enterprise-drop-shows-at-once "$bad"
 rm -f "$H/.claude/.usage-unavailable" "$H/.claude/.rl-spend-state"
-snap 2000 42.3; attempt "$(date +%s)"    # bare, an old figure would read as current
-check narrow-old-figure-keeps-its-age "$(ent CC_WIDTH=8)" 'cap 42%…33m'
-check ascii-old-figure-keeps-its-age "$(ent CC_WIDTH=8 CC_ASCII=1)" 'cap 42%..33m'
+# A figure carries no age, in any width: it is drawn as fetched until it is too
+# old to trust, and then replaced. Here it is 33 minutes old.
+snap 2000 42.3; attempt "$(date +%s)"; bad=
+for w in 0 8; do out=$(ent CC_WIDTH=$w); { has "$out" 'cap ' && has "$out" '42%' && ! has "$out" '42%…'; } || bad="$bad [width $w: $out]"; done
+out=$(ent CC_WIDTH=8 CC_ASCII=1); { has "$out" 'cap 42%' && ! has "$out" '42%..'; } || bad="$bad [ascii: $out]"
+verdict an-old-figure-shows-no-age "$bad"
 # Past three times the floor a figure is not drawn, failure or none: a 6-day-old
 # 100% reads as stale, with its age, not as a full cap.
 snap 518400 100; attempt "$(date +%s)"
@@ -354,10 +357,10 @@ attempt "$(date +%s)"; out=$(cd "$H" && ent 2>&1); bad=
 { [ ! -e "$H/pwned" ] && [ ! -e "$H/eol=1" ]; } || bad=" [it ran a command]"; has "$out" 'not found' && bad="$bad [stderr: $out]"
 verdict hostile-snapshot-is-harmless "$bad"
 
-# A 429 keeps the last figure, with its age and the word, for at least an hour,
+# A 429 keeps the last figure, with the word beside it, for at least an hour,
 # and no call goes out before the wait is over; past the hour, "throttled" alone.
 snap 1200 91; why "throttled $(( $(date +%s) + 600 )) 1"; attempt $(( $(date +%s) - 600 ))
-out=$(ent); bad=; like "$out" '*91%…20m throttled' || bad=" [drew: $out]"; nocall || bad="$bad [called]"
+out=$(ent); bad=; like "$out" '*91% throttled' || bad=" [drew: $out]"; nocall || bad="$bad [called]"
 snap 4000 91; has "$(ent)" 'cap throttled' || bad="$bad [past the hour]"
 verdict throttled-keeps-the-figure-and-waits "$bad"
 # A refresh that failed after the snapshot was fetched is said beside the
@@ -436,8 +439,11 @@ snap -3600 42; why login; attempt "$(date +%s)"; out=$(ent); bad=
 { has "$out" '· cap login' && ! has "$out" '42%'; } || bad=" [drew: $out]"
 verdict future-snapshot-gives-way-to-a-failure "$bad"
 rm -f "$H/.claude/.usage-unavailable"
-snap 240 91; attempt "$(date +%s)"       # from 80% the floor is 5 minutes: 4 minutes old is fresh
-check top-floor-is-5m "$(ent)" '91%' '…'
+# From 80% the floor is 5 minutes: a figure 4 minutes old is not asked for
+# again, one 6 minutes old is. The spend seen is high, so only the age can ask.
+snap 240 91 99; attempt $(( $(date +%s) - 400 )); ent >/dev/null; bad=; nocall || bad=" [4 minutes old: asked]"
+snap 360 91 99; attempt $(( $(date +%s) - 400 )); ent >/dev/null; calls || bad="$bad [6 minutes old: not asked]"
+verdict top-floor-is-5m "$bad"
 # Through a native Windows `jq` the snapshot's last field, the spend seen at the
 # last call, must still read as a number, or every render would take the spend
 # for new and ask again.
@@ -488,12 +494,18 @@ now=$(date +%s); snap 1200 91; bad=
 why "throttled $((now + 2592000)) 1"; attempt $((now - 400)); ent >/dev/null; calls || bad=" [30-day wait]"
 rm -f "$H/.claude/.usage-unavailable"; attempt $((now + 86400)); ent >/dev/null; calls || bad="$bad [call tomorrow]"
 snap -3600 42 99; attempt $((now - 400)); out=$(ent)
-{ has "$out" 'cap 01/' && ! has "$out" '…'; } || bad="$bad [snapshot: $out]"; calls || bad="$bad [snapshot not asked]"
+{ has "$out" 'cap 01/' && has "$out" '42%'; } || bad="$bad [snapshot: $out]"; calls || bad="$bad [snapshot not asked]"
 verdict future-times-not-trusted "$bad"
-attempt "$(date +%s)"; bad=              # CC_USAGE_FLOOR: whole seconds, at least 300, no octal
-snap 200 42; out=$(ent CC_USAGE_FLOOR=30m); { has "$out" '42%' && ! has "$out" '…'; } || bad=" [30m]"
-snap 200 42; out=$(ent CC_USAGE_FLOOR=60);  { has "$out" '42%' && ! has "$out" '…'; } || bad="$bad [60]"
-snap 400 42; has "$(ent CC_USAGE_FLOOR=0300)" '42%…6m' || bad="$bad [0300]"
+# CC_USAGE_FLOOR: whole seconds, at least 300, no octal. The floor shows in when
+# a figure is asked for again; the spend seen is high, so only the age can ask.
+rm -f "$H/.claude/.usage-unavailable"; bad=
+snap 400 42 99; attempt $(( $(date +%s) - 400 )); out=$(ent CC_USAGE_FLOOR=30m)     # not a number: 1800
+{ has "$out" '42%' && nocall; } || bad=" [30m: $out]"
+snap 200 42 99; attempt $(( $(date +%s) - 400 )); out=$(ent CC_USAGE_FLOOR=60)      # under 300: 300
+{ has "$out" '42%' && nocall; } || bad="$bad [60: $out]"
+snap 400 42 99; attempt $(( $(date +%s) - 400 )); out=$(ent CC_USAGE_FLOOR=0900)    # 900, not bad octal
+{ has "$out" '42%' && nocall; } || bad="$bad [0900: $out]"
+snap 1000 42 99; attempt $(( $(date +%s) - 400 )); ent CC_USAGE_FLOOR=0900 >/dev/null; calls || bad="$bad [0900, past the floor: not asked]"
 verdict floor-setting-is-checked "$bad"
 rm -rf "$H"
 # A machine that moved from an enterprise seat to Pro or Max keeps the latch
@@ -1193,15 +1205,15 @@ noatt; credcache 400  true 1250 5000 25 USD 1.2 s1; cred 100 >/dev/null; calls |
 noatt; credcache 400  true 1250 5000 25 USD 1.5 s2; cred 100 >/dev/null; calls || bad="$bad [another session]"
 noatt; credcache 2000 true 1250 5000 25 USD 1.5 s1; cred 100 >/dev/null; calls || bad="$bad [half an hour]"
 verdict credits-ask-after-spend "$bad"
-# An older figure keeps its age, in the narrowest form too; past an hour it is
-# not drawn. A full week counts as much as a full five hours.
+# An older figure shows no age, in the narrowest form either; past an hour it
+# is not drawn. A full week counts as much as a full five hours.
 recent; bad=; credcache 700 true 1250 5000 25
-like "$(cred 100 | strip)" '*¤$12.50…11m' || bad=" [full]"
-has "$(cred 100 CC_WIDTH=18 | strip)" '¤$12.50…11m' || bad="$bad [narrow]"
+like "$(cred 100 | strip)" '*¤$12.50' || bad=" [full: $(cred 100 | strip)]"
+like "$(cred 100 CC_WIDTH=18 | strip)" '*¤$12.50' || bad="$bad [narrow: $(cred 100 CC_WIDTH=18 | strip)]"
 credcache 4000 true 1250 5000 25; out=$(cred 100 | strip); { has "$out" '¤credits' && ! has "$out" '$12'; } || bad="$bad [past the hour]"
 credcache 30 true 1250 5000 25
 like "$(cpay 12 "$(( $(date +%s) + 7200 ))" 100 | env HOME="$C" CC_WIDTH=0 LC_ALL=C "$shell" "$C/statusline.sh" | strip)" '*7d ??? 100% · ¤$*' || bad="$bad [full week]"
-verdict credits-age-and-week "$bad"
+verdict credits-old-figure-and-week "$bad"
 # The same for the usage credits: a failure after the figure was fetched shows
 # beside it.
 recent; credcache 300 true 1250 5000 25; printf 'login\n%s\n' "$(date +%s)" > "$C/.claude/.credits-unavailable"; bad=
@@ -1214,9 +1226,9 @@ noatt; printf '{"fetched_at":%s,"enabled":true,"used_minor":4500,"limit_minor":5
   "$(( $(date +%s) - 300 ))" "$(( $(date +%s) - 60 ))" > "$C/.claude/.credits-cache.json"
 out=$(cred 100 | strip); bad=; has "$out" '$45.00' && bad=" [drew: $out]"; calls || bad="$bad [not asked]"
 verdict credits-last-month-is-not-drawn "$bad"
-# Plain ASCII: + for the credits sign, .. for the age.
+# Plain ASCII: + for the credits sign.
 recent; bad=; credcache 700 true 1250 5000 25
-like "$(cred 100 CC_ASCII=1 | strip)" '* | +$12.50..11m' || bad=" [figure: $(cred 100 CC_ASCII=1 | strip)]"
+like "$(cred 100 CC_ASCII=1 | strip)" '* | +$12.50' || bad=" [figure: $(cred 100 CC_ASCII=1 | strip)]"
 rm -f "$C/.claude/.credits-cache.json"; printf 'login\n' > "$C/.claude/.credits-unavailable"; recent
 like "$(cred 100 CC_ASCII=1 | strip)" '* | +login' || bad="$bad [reason]"
 rm -f "$C/.claude/.credits-unavailable"; recent
