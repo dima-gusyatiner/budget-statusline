@@ -25,7 +25,7 @@ The forms, with the columns each one takes. Each is drawn from that width up to 
 | 2 | The dots between groups |
 | 3 | `(1M)` after the model, and the token count |
 | 4 | The branch's type, such as `feat/`. A name still over 13 characters is cut to 12 and `…`. A short branch like `main` loses nothing here, so the example skips it |
-| 5 | Reset times, the burn estimate, and dollars shown next to a percentage. An old figure keeps its age |
+| 5 | Reset times, the burn estimate, and dollars shown next to a percentage |
 | 6 | The model and the effort |
 | 7 | The branch |
 | 8 | The context |

@@ -76,7 +76,7 @@ Tested by hand on Claude Code 2.1.292 on macOS 26. Both test suites run on Linux
 
 ## What the line says
 
-`↯1.2h` in the picture is the burn estimate: at the recent pace, that window is full in 1.2 hours. Colour carries the severity: **green** under 50%, **yellow** from 50%, **red** from 80%. A word in place of a figure, such as `cap login`, says why there is none ([troubleshooting](#troubleshooting)). On a narrow terminal the line drops detail in steps, budget last ([narrow terminals](docs/narrow-terminals.md)). Every part, symbol and state: [what the line shows](docs/accounts.md).
+`↯1.2h` in the picture is the burn estimate: at the recent pace, that window is full in 1.2 hours. Under an hour it counts minutes, `↯25m`; from 10 hours, whole hours, `↯36h`; from 2 days, whole days, `↯2d`. Colour carries the severity: **green** under 50%, **yellow** from 50%, **red** from 80%. A word in place of a figure, such as `cap login`, says why there is none ([troubleshooting](#troubleshooting)). On a narrow terminal the line drops detail in steps, budget last ([narrow terminals](docs/narrow-terminals.md)). Every part, symbol and state: [what the line shows](docs/accounts.md).
 
 The budget part depends on your account, and picks itself:
 
@@ -132,6 +132,7 @@ Every value, the config folder and the state files: [configuration](docs/configu
 | `cap no refresher`, yellow | `usage-refresh.sh` is missing or not executable. Start a new session: the plugin puts it back, or gives it back the execute bit it lost. Without the plugin, run `install.sh` again |
 | `cap login`, dim | The token expired. Claude Code renews it, and the line looks again 2 minutes later |
 | `cap throttled` | Too many requests. The line backs off, at most an hour between tries, and needs nothing from you |
+| `cap 2h-stale`, dim | The last figure is 2 hours old, too old to draw, and no refresh has failed, as after the machine slept. A new one is asked for as soon as the 5-minute gap allows; nothing to do |
 | `cap api moved`, red | The endpoint changed. Update, or [open an issue](https://github.com/dima-gusyatiner/budget-statusline/issues/new/choose) |
 | Boxes, or symbols over the next character | Your font lacks a symbol: set `CC_ASCII=1` |
 | A folder name instead of the branch | Either a detached HEAD, which has no branch to show, or a repository that belongs to another account, which git will not read. If you trust that one: `git config --global --add safe.directory <path>` |

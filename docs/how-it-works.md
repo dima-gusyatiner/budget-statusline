@@ -58,7 +58,7 @@ A session only hears the replies to its own requests, so one left idle keeps the
 
 ## The burn estimate
 
-`↯1.2h` means that at the recent pace, the window reaches 100% in 1.2 hours. Under an hour the estimate counts minutes, `m`, instead of hours, `h`.
+`↯1.2h` means that at the recent pace, the window reaches 100% in 1.2 hours. It keeps a decimal only under 10 hours: whole minutes under an hour, `↯25m`, and never under `↯1m`; tenths of an hour under 10 hours, `↯4.5h`, or `↯1h` on a whole hour; whole hours under 2 days, `↯36h`; and whole days from there, `↯2d`. Each rounds down, so a time just short of the next step never reads `60m`, `10.0h` or `48h`.
 
 - The pace is a moving average of the window's rises. Each rise counts in full when it comes, then fades: over about 30 minutes on the 5-hour window, and over a day on the others.
 - It belongs to the window, so it is never restarted while the window lasts and does not go blank between replies.

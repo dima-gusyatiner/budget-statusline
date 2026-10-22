@@ -64,7 +64,7 @@ Only while a 5-hour or 7-day window is full. Then the refresher asks when there 
 The line never draws a figure it cannot vouch for, and never hides why a refresh failed.
 
 - A failure recorded after the figure on screen was fetched shows beside that figure, in every form down to the narrowest: `cap 01/Nov 42% login`, or `cap 42% login` on a narrow terminal. A failure from before the figure was fetched is not shown.
-- Past three times the current floor the figure is dropped, and the reason takes its place on its own: `cap login`.
+- Past three times the current floor the figure is dropped, and the reason takes its place on its own: `cap login`. With no failure recorded, the figure's age does: `cap 2h-stale`.
 - With no figure at all, the reason shows at once. While the first fetch is on its way, and nothing has failed, a dim `cap …` holds the place.
 
 The colour says who has to act: dim means there is nothing for you to do, yellow means you fix it, red means the server said no or changed its reply.
@@ -81,13 +81,13 @@ The colour says who has to act: dim means there is nothing for you to do, yellow
 | `http 500`, red | The server refused for another reason, with its status code | 10 minutes |
 | `api moved`, red | HTTP 200, but the reply has a shape the line does not know, or is over 1 MiB | 60 minutes |
 | `no figure`, dim | HTTP 200, a usage reply, but no spend figure for this seat | 60 minutes |
-| `stale 6d`, dim | The figure is too old to draw, and no failure was recorded | as soon as the 5-minute gap allows |
+| `6d-stale`, dim | The last figure is too old to draw, here 6 days, and no failure was recorded | as soon as the 5-minute gap allows |
 
 On an Enterprise seat each reason follows `cap `, as in `cap tls`. Usage credits show the same reasons after `¤`: `¤login`, `¤tls`, `¤no refresher`, or `¤$12.50 login` beside a figure. The ASCII line uses `+`. The last reason, with the time it was recorded, is kept in `.usage-unavailable`, or `.credits-unavailable` for credits, in the config folder.
 
 ## Throttling
 
-After an HTTP 429 the refresher keeps away for the longer of what the server asks in `Retry-After` and 5 minutes, doubled for each further 429 in a row, at most an hour. A 429 is the server asking for quiet, not a broken figure, so the last figure stays on the line for at least an hour, or three floors if that is longer, with its age and the word: `cap 01/Nov 91%…20m throttled`. Only then does it give way to `cap throttled` alone.
+After an HTTP 429 the refresher keeps away for the longer of what the server asks in `Retry-After` and 5 minutes, doubled for each further 429 in a row, at most an hour. A 429 is the server asking for quiet, not a broken figure, so the last figure stays on the line for at least an hour, or three floors if that is longer, with the word beside it: `cap 01/Nov 91% throttled`. Only then does it give way to `cap throttled` alone.
 
 Anthropic publishes no limit for this endpoint. Reports point at several sessions polling one account ([anthropics/claude-code#77477](https://github.com/anthropics/claude-code/issues/77477)), and at retries during a refusal stretching it ([jarrodwatts/claude-hud#275](https://github.com/jarrodwatts/claude-hud/issues/275)). As of October 2026 the main threads ([#30930](https://github.com/anthropics/claude-code/issues/30930), [#31021](https://github.com/anthropics/claude-code/issues/31021), [#31637](https://github.com/anthropics/claude-code/issues/31637)) had no answer from Anthropic. So there is one refresher per login, shared by every session, and at most one call every 5 minutes. For comparison, `ccstatusline` waits 300 seconds after a 429 that names no wait.
 
@@ -97,7 +97,7 @@ The reply has no reset date for the monthly cap, so the line uses the next UTC m
 
 Usage credits have no reset date in the reply either. The line takes the first of next month, local time.
 
-A figure from before the month started over is last month's, however young. The line does not draw it: it asks for a new one at once, and says `cap stale` with the figure's age, or the reason, until the new one comes. A credits figure past its reset date reads `¤credits` until then.
+A figure from before the month started over is last month's, however young. The line does not draw it: it asks for a new one at once, and says how old the figure is, as in `cap 10m-stale`, or the reason, until the new one comes. A credits figure past its reset date reads `¤credits` until then.
 
 ## Anthropic's terms
 

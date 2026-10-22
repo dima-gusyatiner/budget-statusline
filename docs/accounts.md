@@ -17,13 +17,13 @@ git:(main) ✗ · Opus 5 (1M) ◊high · ctx 182k 18% · 5h 06:16 64% ↯1.2h ·
 | Context | `ctx 182k 18%` | Tokens in the context window, and the share of the window they fill |
 | 5-hour window | `5h 06:16 64%` | Pro or Max: the 5-hour usage window, the time it resets and the share used |
 | 7-day window | `7d Wed 62%` | Pro or Max: the weekly window and the day it resets |
-| Burn estimate | `↯1.2h` | At the recent pace, this window is full in 1.2 hours. See [the burn estimate](how-it-works.md#the-burn-estimate) |
+| Burn estimate | `↯1.2h` | At the recent pace, this window is full in 1.2 hours. Under an hour it counts minutes, `↯25m`; from 10 hours, whole hours, `↯36h`; from 2 days, whole days, `↯2d`. See [the burn estimate](how-it-works.md#the-burn-estimate) |
 | Usage credits | `¤$12.40` | Spent on usage credits this month. Shown only while a window is full |
 | Monthly cap | `cap 01/Nov 80%` | Enterprise usage-based seat: the monthly spend cap and the day it resets |
 | Gateway cap | `cap 23/Oct 78%` | Behind a Claude apps gateway: its spend limit, and when it resets: a time when that is less than a day away, such as `cap 14:30 78%`, else a date written like the monthly cap's |
 | Dollars | `$2.50` | API key, Amazon Bedrock or Google Vertex AI: dollars spent this month, summed on your machine |
 | Dollars against a cap | `$42.60/50 85%` | The same, against a cap you name with `CC_SPEND_CAP` |
-| Old figure | `42%…33m` | The figure is 33 minutes old |
+| Stale figure | `cap 2h-stale` | The last figure is 2 hours old, too old to draw. See [old and missing figures](#old-and-missing-figures) |
 | Window over | `5h reset` | The window's reset time has passed and no reply has brought the new window yet. Also `7d reset` and `cap reset` |
 | Reason | `cap login`, `cap 01/Nov 42% login` | Why there is no figure, or why the figure shown could not be refreshed. See [old and missing figures](#old-and-missing-figures) |
 
@@ -78,13 +78,13 @@ A window counts as full when the line draws it at 100%, which is the freshest fi
 
 ## Old and missing figures
 
-The Enterprise cap and usage credits come from the usage endpoint, so their figure can be old, or missing:
+The Enterprise cap and usage credits come from the usage endpoint, so their figure can be old, or missing. A figure shows no age: it is the last one fetched, drawn until it is too old to trust.
 
 | Shown | Means |
 |---|---|
-| `cap 01/Nov 42%…33m` | The figure is 33 minutes old. The age shows once a figure is older than the refresh floor, 30 minutes by default and shorter as the cap nears, and for usage credits from 10 minutes: `¤$12.50…11m` |
-| `cap 01/Nov 42% login` | The last refresh failed after this figure was fetched, and the word says why. After a 429 the figure stays for at least an hour: `cap 01/Nov 91%…20m throttled` |
-| `cap login`, `cap tls`, `cap stale 6d` | No figure the line can vouch for, only the reason |
+| `cap 01/Nov 42%`, `¤$12.50` | The last figure fetched. It is drawn until it is three times the refresh floor old, 90 minutes by default and less as the cap nears, or an hour for usage credits |
+| `cap 01/Nov 42% login` | The last refresh failed after this figure was fetched, and the word says why. After a 429 the figure stays for at least an hour: `cap 01/Nov 91% throttled` |
+| `cap login`, `cap tls`, `cap 6d-stale` | No figure the line can vouch for: only the reason, or how old the last one is, here 6 days |
 | `cap …`, `¤credits` | The first figure is on its way. Both are dim: nothing to do |
 
 Every reason, its colour and when the line tries again: [when it cannot get a number](usage-endpoint.md#when-it-cannot-get-a-number).
@@ -103,7 +103,6 @@ Some fonts lack a symbol, and some terminals cannot show anything outside ASCII.
 | Effort | `◊high` | `high`, or `effort high` with no model before it |
 | Usage credits | `¤$12.40`, `¤login`, `¤credits` | `+$12.40`, `+login`, `+credits` |
 | Burn estimate | `↯1.2h` | `~1.2h` |
-| Old figure | `42%…33m`, `¤$12.50…11m` | `42%..33m`, `+$12.50..11m` |
 | First fetch on its way | `cap …` | `cap ..` |
 
 ```text
