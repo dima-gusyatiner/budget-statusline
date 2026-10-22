@@ -4,6 +4,7 @@
 # colour alone carries severity. Which segments appear depends on the account:
 #   subscription       5h 20:57 24%, 7d Thu 62%  `rate_limits` in the payload
 #   gateway spend cap  cap 23/Oct 78%            `rate_limits.spend_limit`
+#   API key            $2.50, $42.60/50 85%      a local ledger, no server data
 command -v jq >/dev/null 2>&1 || { printf 'statusline: jq not installed'; exit 0; }
 # Every JSON file this reads goes through `jq` into an `eval` of `@sh`, and every
 # field through `v(path; default)` from `$JV`, which keeps a field only when it
@@ -16,9 +17,10 @@ command -v jq >/dev/null 2>&1 || { printf 'statusline: jq not installed'; exit 0
 # link early in a terminal that honours them.
 JV='def s: if type == "string" then explode | map(select(. >= 32 and (. < 127 or . > 159))) | implode elif type == "number" then . else empty end; def v(f; d): [f? | s][0] // d;'
 # One `jq` call reads every field of the payload, straight from stdin.
-eval "$(jq -r "$JV"' @sh "cwd=\(v(.workspace.current_dir; v(.cwd; ""))) mdl=\(v(.model.display_name; "")) eff=\(v(.effort.level; "")) tok=\(v(.context_window.total_input_tokens; 0)) ctxp=\(v(.context_window.used_percentage; "")) p5=\(v(.rate_limits.five_hour.used_percentage; "")) r5=\(v(.rate_limits.five_hour.resets_at; "")) p7=\(v(.rate_limits.seven_day.used_percentage; "")) r7=\(v(.rate_limits.seven_day.resets_at; "")) ps=\(v(.rate_limits.spend_limit.used_percentage; "")) rs=\(v(.rate_limits.spend_limit.resets_at; ""))"' 2>/dev/null)"
+eval "$(jq -r "$JV"' @sh "cwd=\(v(.workspace.current_dir; v(.cwd; ""))) mdl=\(v(.model.display_name; "")) eff=\(v(.effort.level; "")) tok=\(v(.context_window.total_input_tokens; 0)) ctxp=\(v(.context_window.used_percentage; "")) p5=\(v(.rate_limits.five_hour.used_percentage; "")) r5=\(v(.rate_limits.five_hour.resets_at; "")) p7=\(v(.rate_limits.seven_day.used_percentage; "")) r7=\(v(.rate_limits.seven_day.resets_at; "")) ps=\(v(.rate_limits.spend_limit.used_percentage; "")) rs=\(v(.rate_limits.spend_limit.resets_at; "")) usd=\(v(.cost.total_cost_usd; 0)) sid=\(v(.session_id; ""))"' 2>/dev/null)"
 
 [ -n "$cwd" ] || cwd=$PWD
+[ -n "$sid" ] || sid=-          # a session with no id still keeps its own lines
 # Colours are plain variables built from one escape character. A `$(...)` per
 # colour is a process per colour, and Git Bash pays for every one of them.
 E=$(printf '\033')
@@ -51,6 +53,9 @@ else
   SEP=" ${DIM}·${Z} " ELL=… KEEP=12 DIRTY=✗ CLEAN=✓ FOLDER=⌂ EFFORT=◊
 fi
 now=$(date +%s)
+# The login's config folder: `CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
+# Every state file lives there, so two logins on one machine never share one.
+CLAUDE=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 
 # at <epoch> <format>: the time in the local zone, by BSD `date -r`, else GNU
 # `date -d @`. Empty for anything but a whole epoch.
@@ -178,7 +183,7 @@ fi
 
 # Budget items collect three times over: `$sb` in full with a dot between items,
 # `$sbs` the same with a space, and `$sb1` bare: the label and the figure,
-# without the reset stamp.
+# without the reset stamp or the dollars.
 # add <full> [bare]: an item with no shorter form passes one argument
 sb= sbs= sb1=
 add() { sb="${sb:+$sb$SEP}$1"; sbs="${sbs:+$sbs }$1"; sb1="${sb1:+$sb1 }${2:-$1}"; }
@@ -204,6 +209,45 @@ if [ -n "$ps" ]; then                                  # gateway spend cap
   # The time when the reset is within a day, else the date.
   case "$rs" in ''|*[!0-9]*) ;; *) [ $((rs - now)) -gt 86400 ] && fmt=%d/%b ;; esac
   window "$ps" "$rs" "cap " "$fmt"
+elif [ -z "$p5" ]; then
+  # No limits in the payload (API key, Bedrock, Vertex). Claude Code only
+  # reports this session's estimated cost, all it has spent since it started,
+  # so keep a local ledger per period, one line per session:
+  #   <period> <session> <cost> <base> <seen>
+  # `cost` is the session's cost at its last render, `seen` when that was, and
+  # `base` its cost when the period began for it: the last cost it showed in an
+  # earlier period. It counts `cost - base` toward its period, so a session
+  # open across midnight, the week or the 1st brings none of the spend from
+  # before. A line from an earlier period stays as that session's base, not
+  # counted, until it has not been seen for 8 days (a line from before there
+  # were stamps goes at once). A cost that went down is a counter that started
+  # over. `CC_SPEND_PERIOD` is `day`, `week` or `month`
+  # (the default); `CC_SPEND_CAP=<usd>` turns the sum into a share of that cap.
+  case "${CC_SPEND_PERIOD:-month}" in day) pk=$(date +%Y%m%d);; week) pk=$(date +%GW%V);; *) pk=$(date +%Y%m);; esac
+  led="$CLAUDE/.spend-ledger"; [ -f "$led" ] || true 2>/dev/null > "$led"
+  sum=$(awk -v k="$pk" -v s="$sid" -v u="$usd" -v now="$now" -v o="$led.$$" '
+    { c = $3 + 0; b = $4 + 0 }
+    $2 == s { if ($1 == k) { base = b; mine = 1 } else if (!mine) base = c; next }
+    $1 == k { print $1, $2, $3, b, ($5 == "" ? now : $5) > o; if (c > b) t += c - b; next }
+    $5 != "" && $5 + 0 > now - 691200 { print $1, $2, $3, b, $5 > o }
+    END { u += 0; if (u < base) base = 0
+          printf "%s %s %.4f %.4f %d\n", k, s, u, base, now > o; close(o)
+          printf "%.4f", t + u - base }' "$led" 2>/dev/null)
+  mv -f "$led.$$" "$led" 2>/dev/null || rm -f "$led.$$" 2>/dev/null
+  [ -z "$sum" ] && sum=$usd
+  # `CC_SPEND_CAP` is a positive number of dollars, or it is ignored. Like the
+  # sum, it reaches `awk` as a variable, never as program text, so a stray value
+  # cannot run as code.
+  cap=${CC_SPEND_CAP:-}
+  case "$cap" in ''|*[!0-9.]*|*.*.*) cap= ;; *[1-9]*) ;; *) cap= ;; esac
+  money=$(awk -v s="$sum" 'BEGIN { printf "%.2f", s }')
+  if [ -n "$cap" ]; then
+    p=$(awk -v s="$sum" -v c="$cap" 'BEGIN { printf "%d", s / c * 100 }')
+    ramp "$p"
+    add "${R}\$${money}/${cap} ${p}%${Z}" "${R}cap ${p}%${Z}"
+  elif [ "$money" != "0.00" ]; then
+    add "\$${money}"
+  fi
 fi
 
 # --- fit the terminal ---

@@ -11,8 +11,11 @@ sl="$here/../statusline.sh"
 # Ubuntu, does not.
 shell=${SL_SHELL:-sh}
 fails=0
-# Settings left in the shell that runs the suite would change what it sees.
-unset CC_WIDTH CC_ASCII COLUMNS
+# Settings left in the shell that runs the suite would change what it sees. The
+# config folder ones matter most: with `CLAUDE_CONFIG_DIR` set, the scripts would
+# keep their state in the real folder it names, not in the scratch `HOME`.
+unset CC_WIDTH CC_SPEND_CAP CC_SPEND_PERIOD CC_ASCII COLUMNS
+unset CLAUDE_CONFIG_DIR
 # The locale too: the suite reads numbers and dates in the C locale, and a check
 # that wants another one sets it.
 unset LANG LC_ALL LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MESSAGES LC_MONETARY
@@ -96,6 +99,24 @@ for r in 1800000000.5 '"2026-11-01T00:00:00Z"'; do
   has "$out" '· cap 78%' || bad="$bad [$r: $out]"; [ -s "$H/err" ] && bad="$bad [$r, stderr: $(head -1 "$H/err")]"
 done
 rm -rf "$H"; verdict gateway-odd-reset-still-draws "$bad"
+out=$(run apikey.json);                 check apikey-ledger     "$out" '$2.50' "· cap "
+# With a cap of your own the dollars read as a share of it; the narrowest form
+# keeps the share alone, under the word cap.
+check apikey-ledger-cap "$(run apikey.json CC_SPEND_CAP=50)" '· $2.50/50 5%'
+check apikey-ledger-cap-narrow "$(run apikey.json CC_SPEND_CAP=50 CC_WIDTH=8)" 'cap 5%' '$'
+# `CC_SPEND_CAP` is a positive number or it is ignored, and it never runs as `awk`
+# program text: 0 and abc draw the plain dollars, quietly, and a value written
+# to run a command runs nothing.
+X=$(mktemp -d); bad=
+for c in 0 0.0 . abc '50;x' "1;system(\"touch $X/pwned\")"; do
+  out=$(run apikey.json "CC_SPEND_CAP=$c" 2>"$X/err")
+  { has "$out" '· $2.50' && ! has "$out" '%'; } || bad="$bad [$c: $out]"
+  [ -s "$X/err" ] && bad="$bad [$c, stderr: $(head -1 "$X/err")]"
+done
+[ ! -e "$X/pwned" ] || bad="$bad [a command ran]"
+has "$(run apikey.json CC_SPEND_CAP=0.5)" '· $2.50/0.5 500%' || bad="$bad [0.5: $(run apikey.json CC_SPEND_CAP=0.5)]"
+rm -rf "$X"
+verdict spend-cap-is-checked "$bad"
 
 # A field of the wrong type (an array, an object, a string where an object
 # belongs) leaves that field empty and the rest of the line intact, quietly.
@@ -107,6 +128,38 @@ for odd in '"model":{"display_name":["a","b"]}' '"model":{"display_name":{"x":1}
   [ -s "$H/err" ] && bad="$bad [$odd, stderr: $(head -1 "$H/err")]"
 done
 rm -rf "$H"; verdict odd-payload-fields-keep-the-line "$bad"
+
+# The ledger adds up every session of the period ($2.50 and $1.00 read $3.50),
+# drops a line from an earlier period, names the period `CC_SPEND_PERIOD` asks
+# for, and reads $42.60 against a cap of 50 as 85%.
+L=$(mktemp -d); mkdir -p "$L/.claude"; cp "$sl" "$L/statusline.sh"; bad=
+lpay() {  # lpay <session> <usd> [VAR=value...]: one API-key render
+  lp_s=$1 lp_u=$2; shift 2
+  printf '{"session_id":"%s","workspace":{"current_dir":"%s"},"cost":{"total_cost_usd":%s}}' "$lp_s" "$L" "$lp_u" \
+    | env HOME="$L" CC_WIDTH=0 "$@" "$shell" "$L/statusline.sh" | strip
+}
+printf '197001 old 99.0000\n' > "$L/.claude/.spend-ledger"
+lpay a 2.5 >/dev/null; out=$(lpay b 1)
+has "$out" '· $3.50' || bad=" [two sessions: $out]"
+grep -q '^197001 ' "$L/.claude/.spend-ledger" && bad="$bad [an earlier period kept]"
+lpay a 2.5 >/dev/null; has "$(lpay b 1.25)" '· $3.75' || bad="$bad [a session that spent more]"
+rm -f "$L/.claude/.spend-ledger"; lpay a 1 CC_SPEND_PERIOD=day >/dev/null
+grep -q "^$(date +%Y%m%d) a " "$L/.claude/.spend-ledger" || bad="$bad [day: $(cat "$L/.claude/.spend-ledger")]"
+rm -f "$L/.claude/.spend-ledger"; has "$(lpay a 42.6 CC_SPEND_CAP=50)" '· $42.60/50 85%' || bad="$bad [cap: $(lpay a 42.6 CC_SPEND_CAP=50)]"
+verdict ledger-adds-sessions-and-periods "$bad"
+# A session open across the turn of its period (midnight, the week, the 1st)
+# counts only what it spends after it: its line from the last period is its
+# base. Another session's line from the last period is its base too, and not
+# counted. A line not seen for 8 days goes.
+now=$(date +%s); bad=
+printf '20000101 s 40.0000 0.0000 %s\n20000101 b 10.0000 0.0000 %s\n20000101 z 5.0000 0.0000 %s\n' \
+  "$now" "$now" "$(( now - 777600 ))" > "$L/.claude/.spend-ledger"
+out=$(lpay s 40 CC_SPEND_CAP=50); has "$out" '· $0.00/50 0%' || bad=" [no spend since: $out]"
+out=$(lpay s 42.5 CC_SPEND_CAP=50); has "$out" '· $2.50/50 5%' || bad="$bad [after spend: $out]"
+out=$(lpay b 13 CC_SPEND_CAP=50); has "$out" '· $5.50/50 11%' || bad="$bad [the other session: $out]"
+grep -q ' z ' "$L/.claude/.spend-ledger" && bad="$bad [a line not seen for 8 days kept]"
+verdict ledger-counts-only-this-periods-spend "$bad"
+rm -rf "$L"
 
 # --- narrow terminals ---
 # A scratch repository gives the git group a known branch, written by hand so a
