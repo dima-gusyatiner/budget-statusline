@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/dima-gusyatiner/budget-statusline/blob/main/SECURITY.md
+    about: Please report vulnerabilities privately, as SECURITY.md describes, not in a public issue.
+  - name: A problem with Claude Code itself
+    url: https://github.com/anthropics/claude-code/issues
+    about: Bugs in Claude Code, its footer or its own usage views belong to Anthropic's tracker.

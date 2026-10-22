@@ -100,7 +100,7 @@ Until its first reply, a new session shows the figures another session has seen 
 | Writes | Small state files with figures and times. The token is never stored or logged | In the config folder, as the line updates |
 | Writes | The two scripts and a manifest, the plugin's log and its last message, and a `statusLine` in `settings.json` only when there is none | At session start (plugin), or when you run `install.sh` |
 
-`usage-refresh.sh` identifies itself as Claude Code (`User-Agent: claude-code/<version>`), because the endpoint has throttled requests without that. The endpoint is undocumented and may change or go away; the line then shows the reason, such as `cap api moved`, rather than a wrong number. Anthropic's terms restrict third-party use of Claude.ai credentials: read the [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) and decide. To switch the endpoint off, put `CC_ENTERPRISE=0 CC_CREDITS=0` in front of the command already in your `settings.json`, keeping its path, as in `CC_ENTERPRISE=0 CC_CREDITS=0 ~/.claude/statusline.sh`. Then the line reads no token and makes no network call, and an Enterprise seat shows the local dollar estimate. Details: [the usage endpoint](docs/usage-endpoint.md).
+`usage-refresh.sh` identifies itself as Claude Code (`User-Agent: claude-code/<version>`), because the endpoint has throttled requests without that. The endpoint is undocumented and may change or go away; the line then shows the reason, such as `cap api moved`, rather than a wrong number. Anthropic's terms restrict third-party use of Claude.ai credentials: read the [legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) and decide. To switch the endpoint off, put `CC_ENTERPRISE=0 CC_CREDITS=0` in front of the command already in your `settings.json`, keeping its path, as in `CC_ENTERPRISE=0 CC_CREDITS=0 ~/.claude/statusline.sh`. Then the line reads no token and makes no network call, and an Enterprise seat shows the local dollar estimate. Details: [the usage endpoint](docs/usage-endpoint.md) and [SECURITY.md](SECURITY.md).
 
 ## Configuration
 
@@ -166,8 +166,9 @@ Installed with the script? Run `sh install.sh --uninstall` in your clone.
 
 ## Support
 
-- Best effort: this is a one-person project with no promised response time. Bugs go in the [issue tracker](https://github.com/dima-gusyatiner/budget-statusline/issues/new/choose).
+- Best effort: this is a one-person project with no promised response time. Bugs go in the [bug form](https://github.com/dima-gusyatiner/budget-statusline/issues/new/choose).
 - Feature requests are welcome and may be declined: the line stays one line, and the scripts stay plain `sh`.
+- Security problems: report them privately, as [SECURITY.md](SECURITY.md) says.
 
 ## More
 
@@ -175,5 +176,6 @@ Installed with the script? Run `sh install.sh --uninstall` in your clone.
 - [How it works](docs/how-it-works.md): which budget is drawn, several sessions, the burn estimate
 - [The usage endpoint](docs/usage-endpoint.md): when it is called, what it sends, what each failure means
 - [Configuration](docs/configuration.md), [narrow terminals](docs/narrow-terminals.md), [Windows](docs/windows.md), [limits](docs/limits.md)
+- [Contributing](CONTRIBUTING.md), [changelog](CHANGELOG.md), [security](SECURITY.md)
 
 MIT licence, see [LICENSE](LICENSE). An independent project, not made or endorsed by Anthropic.
