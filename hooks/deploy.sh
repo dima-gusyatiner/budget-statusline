@@ -15,13 +15,17 @@
 # A managed `allowManagedHooksOnly`, or `disableAllHooks`, blocks both this hook
 # and the status line command itself. Nothing here can work around that, by
 # design.
+#
+# `install.sh` applies the same rules for machines without the plugin system
+# and shares the manifest, so keep the two in step.
 set -u
 # fd 3 keeps stdout for that one line; `command` keeps a closed stdout from
 # ending the hook here.
 command exec 2>/dev/null 3>&1 || exec 3>/dev/null
 exec >/dev/null 2>&1
 held=
-# lock: take `$LOCK` and write this run's pid into it. Returns 0 when taken, 1
+# lock: take `$LOCK`, the one lock this and the other installer share (the
+# hook, `install.sh`), and write this run's pid into it. Returns 0 when taken, 1
 # when another run holds it, 2 when the folder cannot be written. A holder still
 # at work keeps it; a dead holder's lock is taken over at once, and one with no
 # pid (a holder killed before writing it) after a minute. A takeover renames
@@ -44,14 +48,14 @@ lock() {
   held=1; printf '%s\n' "$$" > "$LOCK/pid" 2>/dev/null
   rm -rf "$LOCK.$$" 2>/dev/null; return 0
 }
-# deploying <pid>: the lock's holder is a hook still at work. A run killed with
-# no chance to clean up leaves its pid to be reused, so where `ps` can show the
-# command, it must still be a hook; where `ps` cannot tell, the pid alone
-# counts.
+# deploying <pid>: the lock's holder is a hook or an installer still at work. A
+# run killed with no chance to clean up leaves its pid to be reused, so where
+# `ps` can show the command, it must still be one of the two; where `ps` cannot
+# tell, the pid alone counts.
 deploying() {
   kill -0 "$1" 2>/dev/null || return 1
   dp_c=$(ps -o command= -p "$1" 2>/dev/null) || return 0
-  case "$dp_c" in *deploy.sh*) return 0 ;; esac
+  case "$dp_c" in *deploy.sh*|*install.sh*) return 0 ;; esac
   return 1
 }
 # unlock: give the lock back, but only while it holds this run's pid: a run that
@@ -66,6 +70,7 @@ trap 'exit 0' HUP INT TERM
 
 CLAUDE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}"
+SRC=$ROOT                        # where the scripts come from, as the helpers shared with `install.sh` call it
 MANIFEST="$CLAUDE/.budget-statusline-manifest"
 LOG="$CLAUDE/.budget-statusline.log"
 NOTICE="$CLAUDE/.budget-statusline-notice"
@@ -79,9 +84,10 @@ if [ -f "$LOG" ] && [ "$(wc -l < "$LOG" 2>/dev/null || echo 0)" -gt 400 ]; then
   tail -n 200 "$LOG" > "$LOG.$$" 2>/dev/null && mv -f "$LOG.$$" "$LOG" 2>/dev/null
 fi
 
-# One deploy at a time. Two sessions starting together would race on the
-# manifest, and a lost line leaves a script that reads as not ours for good. The
-# holder does the same work, so a held lock leaves nothing to do.
+# One deploy at a time, shared with `install.sh`. Two sessions starting together
+# would race on the manifest, and a lost line leaves a script that reads as not
+# ours for good. The holder does the same work, so a held lock leaves nothing
+# to do.
 LOCK="$CLAUDE/.budget-statusline.lock"
 lock; case $? in
   0) ;;
@@ -106,7 +112,7 @@ record() {  # remember that we own <name> at checksum <sum>
 edited() {
   ed_d="$CLAUDE/$1"; [ -f "$ed_d" ] && [ ! -L "$ed_d" ] || return 1
   ed_m=$(recorded "$1"); [ -n "$ed_m" ] || return 1
-  ed_h=$(sum "$ed_d"); [ "$ed_h" != "$ed_m" ] && [ "$ed_h" != "$(sum "$ROOT/$1")" ]
+  ed_h=$(sum "$ed_d"); [ "$ed_h" != "$ed_m" ] && [ "$ed_h" != "$(sum "$SRC/$1")" ]
 }
 
 # stranger <name>: true when something is at `$CLAUDE/<name>` that this tool did
@@ -186,7 +192,7 @@ esc=$(printf '%s' "$cmd" | sed 's/\\/\\\\/g; s/"/\\"/g')
 line="\"statusLine\": { \"type\": \"command\", \"command\": \"$esc\", \"refreshInterval\": 60 }"
 # ours <command>: true when the command runs this folder's `statusline.sh` and
 # nothing else: optional `NAME=value` words first (the docs put settings
-# there), an optional `bash`, then the script's path as the hook writes
+# there), an optional `bash`, then the script's path as the installers write
 # it, plain or quoted for the shell, or as `~/.claude/statusline.sh` when this
 # is the default folder. A longer name (`statusline.sh.mine`) or anything after
 # the path (`| my-filter`) makes it the user's own command.
