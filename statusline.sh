@@ -11,7 +11,7 @@ command -v jq >/dev/null 2>&1 || { printf 'statusline: jq not installed'; exit 0
 # link early in a terminal that honours them.
 JV='def s: if type == "string" then explode | map(select(. >= 32 and (. < 127 or . > 159))) | implode elif type == "number" then . else empty end; def v(f; d): [f? | s][0] // d;'
 # One `jq` call reads every field of the payload, straight from stdin.
-eval "$(jq -r "$JV"' @sh "cwd=\(v(.workspace.current_dir; v(.cwd; ""))) mdl=\(v(.model.display_name; "")) eff=\(v(.effort.level; ""))"' 2>/dev/null)"
+eval "$(jq -r "$JV"' @sh "cwd=\(v(.workspace.current_dir; v(.cwd; ""))) mdl=\(v(.model.display_name; "")) eff=\(v(.effort.level; "")) tok=\(v(.context_window.total_input_tokens; 0)) ctxp=\(v(.context_window.used_percentage; ""))"' 2>/dev/null)"
 
 [ -n "$cwd" ] || cwd=$PWD
 # Colours are plain variables built from one escape character. A `$(...)` per
@@ -23,6 +23,9 @@ MAG="${E}[35m" CYN="${E}[36m" BLU="${E}[1;34m"
 # `SEP` between groups, then the marks for a dirty and a clean tree, a
 # folder outside git and the effort.
 SEP=" ${DIM}·${Z} " DIRTY=✗ CLEAN=✓ FOLDER=⌂ EFFORT=◊
+
+# ramp <percent>: its colour, in `$R`: green under 50, yellow from 50, red from 80
+ramp() { if [ "$1" -ge 80 ]; then R=$RED; elif [ "$1" -ge 50 ]; then R=$YEL; else R=$GRN; fi; }
 
 # clean <text>: the text without control characters, left in `$clean`. A folder,
 # model or effort name is printed as it is, and an escape or a BEL in it could
@@ -72,8 +75,22 @@ if [ -n "$eff" ]; then
   sm="${sm:+$sm }$ef"
 fi
 
+# --- 4. context window: raw / 36.4k / 235k ---
+sc=
+if [ "$tok" -gt 0 ] 2>/dev/null; then
+  if [ "$tok" -lt 1000 ]; then k=$tok
+  elif [ "$tok" -lt 100000 ]; then k=$(awk "BEGIN{printf\"%.1fk\",$tok/1000}")
+  else k="$(( (tok + 500) / 1000 ))k"; fi
+  sc="${DIM}ctx${Z} ${k}"
+  # The share can be missing early in a session; then only the token count shows.
+  if [ -n "$ctxp" ]; then
+    ci=$(printf '%.0f' "$ctxp" 2>/dev/null)
+    ramp "${ci:-0}" 2>/dev/null; sc="${sc} ${R}${ci}%${Z}"
+  fi
+fi
+
 # join <separator> <group>...: the groups that are not empty, in `$line`
 join() { j=$1; shift; line=; for s in "$@"; do [ -n "$s" ] && line="${line:+$line$j}$s"; done; }
 
-join "$SEP" "$sg" "$sm"; full=$line
+join "$SEP" "$sg" "$sm" "$sc"; full=$line
 printf '%s' "$full"

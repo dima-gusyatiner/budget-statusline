@@ -11,14 +11,42 @@ sl="$here/../statusline.sh"
 # Ubuntu, does not.
 shell=${SL_SHELL:-sh}
 fails=0
+# The locale too: the suite reads numbers and dates in the C locale, and a check
+# that wants another one sets it.
+unset LANG LC_ALL LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MESSAGES LC_MONETARY
 E=$(printf '\033')
 
 # What a terminal would show: colour codes and the hyperlink wrapper removed.
 strip() { LC_ALL=C awk '{ gsub(/\033\]8;;[^\033]*\033\\/, ""); gsub(/\033\[[0-9;]*m/, ""); print }'; }
 
+# run <payload> <extra-env...>  -> stripped output on stdout
+run() { runraw "$@" | strip; }
+runraw() {  # runraw <payload> <extra-env...>: the same, escape codes and all
+  p=$1; shift
+  H=$(mktemp -d) || exit 1
+  mkdir -p "$H/.claude"
+  cp "$sl" "$H/statusline.sh"
+  now=$(date +%s)
+  sed -e "s|__CWD__|$here|" -e "s|__T1__|$((now+7200))|" -e "s|__T2__|$((now+200000))|" \
+    "$here/payloads/$p" | env HOME="$H" "$@" "$shell" "$H/statusline.sh"
+  rm -rf "$H"
+}
+
+check() {  # check <name> <output> <must-contain> [must-not-contain]
+  name=$1 out=$2 want=$3 not=${4:-}
+  case "$out" in *"$want"*) ;; *) echo "FAIL $name: missing '$want' in: $out"; fails=$((fails+1)); return;; esac
+  if [ -n "$not" ]; then case "$out" in *"$not"*) echo "FAIL $name: unexpected '$not' in: $out"; fails=$((fails+1)); return;; esac; fi
+  echo "ok   $name"
+}
+
 # A check made of several cases: each case adds what went wrong to `$bad`.
 verdict() { if [ -z "$2" ]; then echo "ok   $1"; else echo "FAIL $1:$2"; fails=$((fails+1)); fi; }
 has() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }    # has <text> <part>
+
+out=$(run subscription.json)
+# The effort follows the model after one space; alone, it gets the dot before it.
+                                        check model-then-effort "$out" "Opus 5 (1M) ◊high · ctx" "· ◊"
+out=$(run effort-only.json);            check effort-alone      "$out" " · ◊high · ctx 880" "Opus"
 
 # A folder path with control characters in it (a BEL would end the folder link
 # and start a forged one) loses them before the link is built: no sequence can
