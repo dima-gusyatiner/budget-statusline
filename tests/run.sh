@@ -11,6 +11,8 @@ sl="$here/../statusline.sh"
 # Ubuntu, does not.
 shell=${SL_SHELL:-sh}
 fails=0
+# Settings left in the shell that runs the suite would change what it sees.
+unset CC_WIDTH COLUMNS
 # The locale too: the suite reads numbers and dates in the C locale, and a check
 # that wants another one sets it.
 unset LANG LC_ALL LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MESSAGES LC_MONETARY
@@ -18,8 +20,11 @@ E=$(printf '\033')
 
 # What a terminal would show: colour codes and the hyperlink wrapper removed.
 strip() { LC_ALL=C awk '{ gsub(/\033\]8;;[^\033]*\033\\/, ""); gsub(/\033\[[0-9;]*m/, ""); print }'; }
+# vis <text>: the columns it takes, one per character whatever its bytes
+vis() { printf '%s' "$1" | LC_ALL=C awk '{ gsub(/[\200-\277]/, ""); n += length($0) } END { print n + 0 }'; }
 
 # run <payload> <extra-env...>  -> stripped output on stdout
+# `CC_WIDTH=0` pins the full line, whatever the width of the terminal running this.
 run() { runraw "$@" | strip; }
 runraw() {  # runraw <payload> <extra-env...>: the same, escape codes and all
   p=$1; shift
@@ -28,7 +33,7 @@ runraw() {  # runraw <payload> <extra-env...>: the same, escape codes and all
   cp "$sl" "$H/statusline.sh"
   now=$(date +%s)
   sed -e "s|__CWD__|$here|" -e "s|__T1__|$((now+7200))|" -e "s|__T2__|$((now+200000))|" \
-    "$here/payloads/$p" | env HOME="$H" "$@" "$shell" "$H/statusline.sh"
+    "$here/payloads/$p" | env HOME="$H" CC_WIDTH=0 "$@" "$shell" "$H/statusline.sh"
   rm -rf "$H"
 }
 
@@ -59,7 +64,7 @@ out=$(run effort-only.json);            check effort-alone      "$out" " · ◊h
 bands() {  # bands <ctx %> <5h %> <7d %>: one render, escape codes and all
   H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
   printf '{"workspace":{"current_dir":"%s"},"context_window":{"total_input_tokens":5,"used_percentage":%s},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":%s,"resets_at":%s}}}' \
-    "$H" "$1" "$2" "$(( $(date +%s) + 7200 ))" "$3" "$(( $(date +%s) + 200000 ))" | env HOME="$H" "$shell" "$H/statusline.sh"
+    "$H" "$1" "$2" "$(( $(date +%s) + 7200 ))" "$3" "$(( $(date +%s) + 200000 ))" | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh"
   rm -rf "$H"
 }
 raw=$(bands 12 49.4 80); bad=
@@ -76,14 +81,14 @@ verdict colour-bands-green-yellow-red "$bad"
 out=$(run gateway.json);                match gateway-cap       "$out" '*· cap [0-3][0-9]/[A-Z][a-z][a-z] 78%'
 H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
 out=$(printf '{"workspace":{"current_dir":"%s"},"rate_limits":{"spend_limit":{"used_percentage":78.4,"resets_at":%s}}}' "$H" "$(( $(date +%s) + 3600 ))" \
-      | env HOME="$H" "$shell" "$H/statusline.sh" | strip); rm -rf "$H"
+      | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" | strip); rm -rf "$H"
 match gateway-cap-soon "$out" '*· cap [0-2][0-9]:[0-5][0-9] 78%'
 # A gateway reset time that is not a whole epoch still draws the cap, with no
 # stamp and nothing on stderr.
 H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"; bad=
 for r in 1800000000.5 '"2026-11-01T00:00:00Z"'; do
   out=$(printf '{"workspace":{"current_dir":"%s"},"rate_limits":{"spend_limit":{"used_percentage":78.4,"resets_at":%s}}}' "$H" "$r" \
-        | env HOME="$H" "$shell" "$H/statusline.sh" 2>"$H/err" | strip)
+        | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" 2>"$H/err" | strip)
   has "$out" '· cap 78%' || bad="$bad [$r: $out]"; [ -s "$H/err" ] && bad="$bad [$r, stderr: $(head -1 "$H/err")]"
 done
 rm -rf "$H"; verdict gateway-odd-reset-still-draws "$bad"
@@ -93,24 +98,95 @@ rm -rf "$H"; verdict gateway-odd-reset-still-draws "$bad"
 H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"; bad=
 for odd in '"model":{"display_name":["a","b"]}' '"model":{"display_name":{"x":1}}' '"model":"Opus","effort":[1]' '"workspace":"/x","cwd":7'; do
   out=$(printf '{%s,"context_window":{"total_input_tokens":5},"rate_limits":{"five_hour":{"used_percentage":24,"resets_at":%s}}}' "$odd" "$(( $(date +%s) + 7200 ))" \
-        | env HOME="$H" "$shell" "$H/statusline.sh" 2>"$H/err" | strip)
+        | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" 2>"$H/err" | strip)
   like "$out" '* · ctx 5 · 5h ??:?? 24%' || bad="$bad [$odd: $out]"
   [ -s "$H/err" ] && bad="$bad [$odd, stderr: $(head -1 "$H/err")]"
 done
 rm -rf "$H"; verdict odd-payload-fields-keep-the-line "$bad"
 
+# --- narrow terminals ---
+# A scratch repository gives the git group a known branch, written by hand so a
+# non-ASCII name reaches the file as bytes, with no argument conversion on Windows.
+N=$(mktemp -d); mkdir -p "$N/home/.claude" "$N/repo" "$N/a-very-long-folder-name"
+git -C "$N/repo" init -q 2>/dev/null
+branch() { printf 'ref: refs/heads/%s\n' "$1" > "$N/repo/.git/HEAD"; }
+cp "$sl" "$N/statusline.sh"
+now=$(date +%s)
+npay() {  # npay <cwd>: a subscription payload with every group in it
+  printf '{"session_id":"t-narrow","version":"2.1.287","model":{"display_name":"Opus 5 (1M context)"},"effort":{"level":"high"},"workspace":{"current_dir":"%s"},"context_window":{"total_input_tokens":36400,"used_percentage":17.6},"rate_limits":{"five_hour":{"used_percentage":24,"resets_at":%s},"seven_day":{"used_percentage":62,"resets_at":%s}}}' \
+    "$1" "$((now+7200))" "$((now+200000))"
+}
+shown() { npay "${2:-$N/repo}" | env HOME="$N/home" LC_ALL=C CC_WIDTH="$1" "$shell" "$N/statusline.sh" | strip; }   # shown <width> [cwd]
+fromcols() {  # fromcols <COLUMNS> [CC_WIDTH]: as Claude Code would have it drawn
+  npay "$N/repo" | env -u CC_WIDTH HOME="$N/home" LC_ALL=C COLUMNS="$1" ${2:+CC_WIDTH="$2"} "$shell" "$N/statusline.sh" | strip
+}
+# The ladder, widest first (??:?? the reset time, ??? the weekday). Each form
+# appears exactly when the one before stops fitting, and fills its width to the
+# last column. The budget alone stays at any width; its 9 columns are counted
+# by hand, which checks the measuring itself.
+branch feat/a-long-branch-name-here
+w=200 bad=
+for form in \
+  'git:(feat/a-long-branch-name-here) ✓ · Opus 5 (1M) ◊high · ctx 36.4k 18% · 5h ??:?? 24% · 7d ??? 62%' \
+  'feat/a-long-branch-name-here ✓ · Opus 5 (1M) ◊high · ctx 36.4k 18% · 5h ??:?? 24% · 7d ??? 62%' \
+  'feat/a-long-branch-name-here ✓ Opus 5 (1M) ◊high ctx 36.4k 18% 5h ??:?? 24% 7d ??? 62%' \
+  'feat/a-long-branch-name-here ✓ Opus 5 ◊high ctx 18% 5h ??:?? 24% 7d ??? 62%' \
+  'a-long-branc… ✓ Opus 5 ◊high ctx 18% 5h ??:?? 24% 7d ??? 62%' \
+  'a-long-branc… ✓ Opus 5 ◊high ctx 18% 5h 24% 7d 62%' \
+  'a-long-branc… ✓ ctx 18% 5h 24% 7d 62%' \
+  'ctx 18% 5h 24% 7d 62%' \
+  '5h 24% 7d 62%'
+do
+  out=$(shown "$w"); v=$(vis "$out")
+  like "$out" "$form" || bad="$bad [at width $w: $out]"
+  { [ "$v" -le "$w" ] && [ "$(shown "$v")" = "$out" ]; } || bad="$bad [the $v-column form does not fill its width]"
+  w=$((v - 1))
+done
+[ "$v" = 13 ] || bad="$bad [the last form counts $v columns, not 13]"
+[ "$(shown 1)" = '5h 24% 7d 62%' ] || bad="$bad [width 1 lost the budget]"
+verdict narrow-ladder "$bad"
+# The width is `COLUMNS` less the 4 columns round the status line box, unless
+# `CC_WIDTH` says otherwise: a width, a negative margin, 0 for off. Form 5 needs 50.
+f5='a-long-branc… ✓ Opus 5 ◊high ctx 18% 5h 24% 7d 62%' f6='a-long-branc… ✓ ctx 18% 5h 24% 7d 62%'
+full='git:(feat/a-long-branch-name-here) ✓ · *'; bad=
+for row in "54||$f5" "53||$f6" "62|-10|$f5" "200|50|$f5" "200|0|$full" "0||$full" "54|abc|$f5" "058|-08|$f5"; do
+  c=${row%%|*} r=${row#*|}; wv=${r%%|*} want=${r#*|}
+  got=$(fromcols "$c" "$wv"); like "$got" "$want" || bad="$bad [COLUMNS=$c CC_WIDTH=$wv: $got]"
+done
+like "$(npay "$N/repo" | env -u CC_WIDTH -u COLUMNS HOME="$N/home" LC_ALL=C "$shell" "$N/statusline.sh" | strip)" "$full" || bad="$bad [no COLUMNS]"
+verdict narrow-width-rules "$bad"
+# A long name is cut to 12 characters and an ellipsis, a folder's too. A name
+# outside ASCII is never cut by a shell that counts bytes: whole in the C locale,
+# valid UTF-8 in a UTF-8 one (this name's 12th byte is inside a letter).
+bad=
+[ "$(shown 36 "$N/a-very-long-folder-name")" = '⌂a-very-long-… ctx 18% 5h 24% 7d 62%' ] || bad=" [folder]"
+branch feat/zażółć-gęślą-jaźń-długa
+[ "$(shown 47)" = 'zażółć-gęślą-jaźń-długa ✓ ctx 18% 5h 24% 7d 62%' ] || bad="$bad [C locale]"
+branch feat/łódź-źdźbło-żółw
+verdict narrow-names-are-cut-safely "$bad"
+# In a UTF-8 locale the cut falls between characters: the line stays valid UTF-8.
+u8=; for l in C.UTF-8 en_US.UTF-8 C.utf8 en_US.utf8; do [ "$(LC_ALL=$l locale charmap 2>/dev/null)" = UTF-8 ] && { u8=$l; break; }; done
+if ! command -v iconv >/dev/null 2>&1 || [ -z "$u8" ]; then
+  echo "ok   narrow-cut-stays-valid-utf8 (skipped: no iconv or no UTF-8 locale here)"
+else
+  bad=; npay "$N/repo" | env HOME="$N/home" LC_ALL="$u8" CC_WIDTH=44 "$shell" "$N/statusline.sh" 2>/dev/null \
+    | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || bad=" [invalid UTF-8 under $u8]"
+  verdict narrow-cut-stays-valid-utf8 "$bad"
+fi
+rm -rf "$N"
+
 # A folder path with control characters in it (a BEL would end the folder link
 # and start a forged one) loses them before the link is built: no sequence can
 # be forged, and no BEL or ESC of its own reaches the terminal.
 H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
-raw=$(printf '{"workspace":{"current_dir":"/tmp/x\\u0007\\u001b]8;;https://evil.example/\\u0007y"}}' | env HOME="$H" "$shell" "$H/statusline.sh")
+raw=$(printf '{"workspace":{"current_dir":"/tmp/x\\u0007\\u001b]8;;https://evil.example/\\u0007y"}}' | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh")
 rm -rf "$H"
 bad=; { has "$raw" "${E}]8;;https" || has "$raw" "$(printf '\007')"; } && bad=" [a forged link: $(printf '%s' "$raw" | LC_ALL=C od -c | head -3 | tr -s ' ')]"
 verdict folder-path-with-control-characters-cannot-forge-a-link "$bad"
 # The C1 controls too (U+0080 to U+009F, here CSI, NEL and OSC), which a shell
 # that counts bytes, or any shell in the C locale, does not see as controls.
 H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
-raw=$(printf '{"workspace":{"current_dir":"/tmp/a\\u009b31mb"},"model":{"display_name":"Opus\\u0085 5"},"effort":{"level":"hi\\u009dgh"}}' | env HOME="$H" "$shell" "$H/statusline.sh")
+raw=$(printf '{"workspace":{"current_dir":"/tmp/a\\u009b31mb"},"model":{"display_name":"Opus\\u0085 5"},"effort":{"level":"hi\\u009dgh"}}' | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh")
 rm -rf "$H"; bad=
 for c in '\302\233' '\302\205' '\302\235'; do has "$raw" "$(printf "$c")" && bad="$bad [$c got through]"; done
 [ "$(printf '%s' "$raw" | strip)" = '⌂a31mb · Opus 5 ◊high' ] || bad="$bad [drew: $(printf '%s' "$raw" | strip)]"
@@ -120,7 +196,7 @@ verdict names-lose-c1-controls "$bad"
 # BEL. The script's own colour and link codes stay.
 H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
 raw=$(printf '{"workspace":{"current_dir":"/tmp/a\\u001b]52;c;aGk=\\u0007b"},"model":{"display_name":"Opus\\u001b]52;c;aGk=\\u0007 5"},"effort":{"level":"hi\\u001b[2Jgh"}}' \
-      | env HOME="$H" "$shell" "$H/statusline.sh")
+      | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh")
 rm -rf "$H"; bad=
 { has "$raw" "${E}]52" || has "$raw" "${E}[2J" || has "$raw" "$(printf '\007')"; } && bad=" [a control character got through]"
 [ "$(printf '%s' "$raw" | strip)" = '⌂a]52;c;aGk=b · Opus]52;c;aGk= 5 ◊hi[2Jgh' ] || bad="$bad [drew: $(printf '%s' "$raw" | strip)]"
@@ -136,7 +212,7 @@ owner="GIT_TEST_ASSUME_DIFFERENT_OWNER=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_
 if env $owner git -C "$O/repo" rev-parse --git-dir >/dev/null 2>&1; then
   echo "ok   foreign-repo-shows-the-folder (skipped: this git does not check who owns a repository)"
 else
-  out=$(printf '{"workspace":{"current_dir":"%s/repo"}}' "$O" | env HOME="$O/home" $owner "$shell" "$O/statusline.sh" | strip)
+  out=$(printf '{"workspace":{"current_dir":"%s/repo"}}' "$O" | env HOME="$O/home" CC_WIDTH=0 $owner "$shell" "$O/statusline.sh" | strip)
   bad=; [ "$out" = '⌂repo' ] || bad=" [drew: $out]"; [ ! -e "$O/ran" ] || bad="$bad [the repository's fsmonitor ran]"
   verdict foreign-repo-shows-the-folder "$bad"
 fi
@@ -149,7 +225,7 @@ printf 'a\n' > "$I/repo/f"; git -C "$I/repo" add f; git -C "$I/repo" -c user.nam
 touch -t 202001010000 "$I/repo/f"
 idx() { printf '%s %s' "$(ls -i "$I/repo/.git/index" | awk '{print $1}')" "$(cksum < "$I/repo/.git/index")"; }
 before=$(idx)
-out=$(printf '{"workspace":{"current_dir":"%s/repo"}}' "$I" | env HOME="$I/home" "$shell" "$I/statusline.sh" | strip)
+out=$(printf '{"workspace":{"current_dir":"%s/repo"}}' "$I" | env HOME="$I/home" CC_WIDTH=0 "$shell" "$I/statusline.sh" | strip)
 bad=; [ "$(idx)" = "$before" ] || bad=" [the index was rewritten]"; has "$out" 'git:(' || bad="$bad [drew: $out]"
 verdict render-leaves-the-index-alone "$bad"
 rm -rf "$I"
