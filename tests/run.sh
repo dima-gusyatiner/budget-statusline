@@ -348,9 +348,13 @@ for w in 0 8; do out=$(ent CC_WIDTH=$w); { has "$out" 'cap ' && has "$out" '42%'
 out=$(ent CC_WIDTH=8 CC_ASCII=1); { has "$out" 'cap 42%' && ! has "$out" '42%..'; } || bad="$bad [ascii: $out]"
 verdict an-old-figure-shows-no-age "$bad"
 # Past three times the floor a figure is not drawn, failure or none: a 6-day-old
-# 100% reads as stale, with its age, not as a full cap.
-snap 518400 100; attempt "$(date +%s)"
-check old-snapshot-reads-stale "$(ent)" '· cap stale 6d' '100%'
+# 100% reads as stale, with its age, in one dim word, not as a full cap. The
+# ASCII line reads the same.
+snap 518400 100; attempt "$(date +%s)"; bad=
+out=$(ent); { has "$out" '· cap 6d-stale' && ! has "$out" '100%'; } || bad=" [drew: $out]"
+has "$(entraw)" "${E}[2mcap 6d-stale" || bad="$bad [not dim]"
+has "$(ent CC_ASCII=1)" '| cap 6d-stale' || bad="$bad [ascii: $(ent CC_ASCII=1)]"
+verdict old-snapshot-reads-stale "$bad"
 # A snapshot is read through the same guard: an array runs nothing, quietly.
 printf '{"fetched_at":%s,"spend_seen":0,"percent":["x","touch","%s/pwned"],"used_minor":8400,"limit_minor":20000}\n' "$(date +%s)" "$H" > "$H/.claude/.usage-cache.json"
 attempt "$(date +%s)"; out=$(cd "$H" && ent 2>&1); bad=

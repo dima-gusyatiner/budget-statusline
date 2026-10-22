@@ -786,7 +786,7 @@ elif [ -z "$p5" ] && [ -n "$ent" ]; then
   else
     # No figure to draw: a snapshot too old, or none yet. Say why, or how old the
     # snapshot is, or, while the first fetch is on its way, a dim placeholder.
-    said "cap " || { [ -n "$ucx" ] && add "${DIM}cap stale $(agefmt "$cage")${Z}"; } || add "${DIM}cap ${ELL}${Z}"
+    said "cap " || { [ -n "$ucx" ] && add "${DIM}cap $(agefmt "$cage")-stale${Z}"; } || add "${DIM}cap ${ELL}${Z}"
   fi
 elif [ -z "$p5" ] && [ -z "$drew" ] && ! limits_seen; then
   # No cached figures either (API key, Bedrock, Vertex). Claude Code only
