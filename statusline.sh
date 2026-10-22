@@ -353,9 +353,14 @@ fields() {
   case "$r_E" in ''|*[!0-9.e+-]*) r_ok= ;; esac
 }
 # estimate: the record's pace after this render in `$r_e`, and when the estimate
-# shows, the time to 100% in `$r_eta` ("25m", "1.2h") and 1 in `$r_red` when that
-# comes before the reset. It reads `$r_k`, `$rf`, `$r_B`, `$r_T`, `$r_E`,
-# `$r_l` and `$r_rise`, as `record` and `heard` leave them.
+# shows, the time to 100% in `$r_eta` ("25m", "4.5h", "36h", "2d") and 1 in
+# `$r_red` when that comes before the reset. It reads `$r_k`, `$rf`, `$r_B`,
+# `$r_T`, `$r_E`, `$r_l` and `$r_rise`, as `record` and `heard` leave them.
+# The time has a decimal only under 10 hours, where it still changes what to do:
+# whole minutes under an hour, never under 1m; tenths of an hour under 10 hours,
+# with no ".0" on a whole hour; whole hours under 2 days; whole days from there.
+# Each band rounds down, so a time on its way to the next band never prints
+# that band's first value: 59m59s reads 59m, never 60m, then 10.0h and 48h.
 # Shown from 50% on the 5-hour window and 70% on longer ones, below 100%, once
 # the pace is 5 minutes old, and never for a window whose reset has passed:
 # `window()` draws no estimate for one, and leaving `r_show` empty there spares
@@ -375,7 +380,10 @@ estimate() {
     printf "%.6g", e
     if (show == "" || e <= 0) exit
     eta = int((100 - cur) / (e / (1 - exp(-age / tau))))
-    if (eta < 3600) printf " %dm", int((eta + 59) / 60); else printf " %.1fh", eta / 3600
+    if (eta < 3600) { n = int(eta / 60); printf " %dm", (n < 1 ? 1 : n) }
+    else if (eta < 36000) { n = int(eta / 360); if (n % 10) printf " %d.%dh", int(n / 10), n % 10; else printf " %dh", n / 10 }
+    else if (eta < 172800) printf " %dh", int(eta / 3600)
+    else printf " %.0fd", int(eta / 86400)
     printf " %d", (left != "" && eta < left + 0)
   }' 2>/dev/null)
   r_e=${1:-} r_eta=${2:-} r_red=${3:-}

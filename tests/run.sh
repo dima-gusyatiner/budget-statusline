@@ -1241,9 +1241,9 @@ wl() {  # wl <time> <session> <five_hour|seven_day> <percent> <reset> [VAR=value
 rec() { cat "$W/home/.claude/.rl-$1-state" 2>/dev/null; }    # rec <key>: the record, one line
 anew() { rm -f "$W/home/.claude"/.rl-*; }
 mins() {  # mins <line>: the burn estimate in whole minutes, or nothing
-  printf '%s' "$1" | strip | LC_ALL=C awk '{ if (match($0, /↯[0-9.]+[mh]/)) {
+  printf '%s' "$1" | strip | LC_ALL=C awk '{ if (match($0, /↯[0-9.]+[mhd]/)) {
     s = substr($0, RSTART + 3, RLENGTH - 3); n = substr(s, 1, length(s) - 1) + 0
-    if (s ~ /h$/) n = int(n * 60 + 0.5)
+    if (s ~ /h$/) n = int(n * 60 + 0.5); else if (s ~ /d$/) n = n * 1440
     print n } }'
 }
 # Two sessions on one machine. A works and climbs a point every 7.5 minutes; B
@@ -1353,6 +1353,22 @@ anew; t=$T0 p=70
 while [ "$p" -le 75 ]; do out=$(wl $t A seven_day $p $rs); t=$((t + 14400)); p=$((p + 1)); done
 has "$out" "${E}[2m↯" || bad="$bad [a slow week: $(printf '%s' "$out" | strip)]"
 verdict weekly-overspend-shows-from-70 "$bad"
+# The estimate's digits: whole minutes under an hour, never under 1m; one
+# decimal under 10 hours, none on a whole hour; whole hours under 2 days; then
+# whole days. Each band rounds down, so a time just short of the next band
+# never prints 60m, 10.0h or 48h. Each case is a record whose pace puts 100%
+# that many seconds away, read with the clock stopped.
+eta() {  # eta <seconds>: the estimate drawn for a 5-hour window at 50% that fills in that many seconds
+  anew; printf '%s %s %s %s 50 %s\n' $((T0 + 10800)) $((T0 - 200000)) "$T0" "$T0" \
+    "$(LC_ALL=C awk -v s="$1" 'BEGIN { printf "%.12g", 50 / (s + 0.5) }')" > "$W/home/.claude/.rl-5h-state"
+  wl "$T0" A five_hour 50 $((T0 + 10800)) | strip | LC_ALL=C awk '{ if (match($0, /↯[^ ]*/)) print substr($0, RSTART + 3, RLENGTH - 3) }'
+}
+bad=
+for c in 30:1m 119:1m 1500:25m 3599:59m 3600:1h 3959:1h 3960:1.1h 5400:1.5h 35999:9.9h 36000:10h \
+         129600:36h 172799:47h 172800:2d 777600:9d 100000000000000:1157407407d; do
+  got=$(eta "${c%%:*}"); [ "$got" = "${c#*:}" ] || bad="$bad [${c%%:*}s: ${got:-none}, not ${c#*:}]"
+done
+verdict burn-estimate-digits "$bad"
 # The credits check reads the freshest figure: an idle session still on 97%,
 # while another has seen 100%, draws 100% and asks for the credits figures.
 anew; bad=
