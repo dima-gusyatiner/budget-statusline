@@ -13,11 +13,19 @@
 # observed-spend total at call time, stored so the caller can tell how much
 # spend has happened since.
 #
+# With `credits` as the third argument it serves a Claude.ai subscription
+# instead: once a 5-hour or 7-day window is full, Claude Code spends usage
+# credits, and the payload says nothing about them. Then `$1` is this session's
+# cost and `$4` its id, it keeps the `extra_usage` part of the reply in
+# `.credits-cache.json`, and it records failures in `.credits-unavailable`. Both
+# are files of their own: `.usage-cache.json` marks a machine as an enterprise
+# seat, and a failure on one path must not hold back the other.
+#
 # Every file lives in the login's config folder, `CLAUDE_CONFIG_DIR` when set,
 # else `~/.claude`, and the login is the one Claude Code keeps for that folder.
 #
 # On failure this writes no snapshot, only a reason into `.usage-unavailable`
-# and on a second line its time:
+# (`.credits-unavailable` in credits mode), and on a second line its time:
 #   nologin | login [expiresAt] | expired | nocurl | offline <curl exit>
 #   tls <curl exit> | http <code> | api | nofigure
 #   throttled <until-epoch> <429s-in-a-row>
@@ -31,6 +39,8 @@ cache="$CLAUDE/.usage-cache.json"
 lock="$CLAUDE/.usage-cache.lock"
 dead="$CLAUDE/.usage-unavailable"
 tmp="$cache.$$"
+mode=${3:-} sess=${4:--}
+[ "$mode" = credits ] && dead="$CLAUDE/.credits-unavailable"
 
 # fail <reason>: record why, and on a second line when, through a temporary
 # file so the status line never reads it half written, and stop. The time is
@@ -222,6 +232,41 @@ case "$code" in
   429)     throttled ;;             # too many requests: wait, and say so calmly
   *)       fail "http $code" ;;
 esac
+
+# nextmonth: the epoch of the 1st of next month, local time: when usage credits
+# start over, as Claude Code's `/usage` dates it. The reply has no reset date
+# for them. `tests/run.sh` runs it for all twelve months.
+nextmonth() {
+  y=$(date +%Y) m=$(date +%m)
+  m=${m#0}; m=$((m + 1)); [ "$m" -gt 12 ] && { m=1; y=$((y + 1)); }
+  d=$(printf '%04d-%02d-01' "$y" "$m")
+  date -j -f '%Y-%m-%d %H:%M:%S' "$d 00:00:00" +%s 2>/dev/null ||
+    date -d "$d 00:00:00" +%s 2>/dev/null
+}
+
+if [ "$mode" = credits ]; then
+  # The credits part of the reply, money in whole minor units (cents for USD),
+  # the percentage 0 to 100, kept only when it is a number, and the currency
+  # only when it is a string. A usage reply with no credits block means the
+  # account has none: kept as "off", so the line stops asking every 5 minutes.
+  # A reply with none of the usage keys at all means the shape moved.
+  rs=$(nextmonth); case "$rs" in ''|*[!0-9]*) rs=null ;; esac
+  jq -ce --argjson t "$(date +%s)" --arg s "$seen" --arg i "$sess" --argjson r "$rs" '
+    select(type == "object" and (has("five_hour") or has("seven_day") or has("extra_usage") or has("limits"))) |
+    (.extra_usage // {is_enabled: false}) as $x |
+    {fetched_at:  $t,
+     spend_seen:  $s,
+     session:     $i,
+     resets_at:   $r,
+     enabled:     ($x.is_enabled == true),
+     used_minor:  (if $x.used_credits == null then null else ($x.used_credits | floor) end),
+     limit_minor: (if $x.monthly_limit == null then null else ($x.monthly_limit | floor) end),
+     percent:     ($x.utilization | if type == "number" then . else null end),
+     currency:    ($x.currency | if type == "string" then . else "USD" end)}' 2>/dev/null < "$tmp" > "$tmp.o" \
+    || fail api                      # 200, but the response shape moved
+  mv -f "$tmp.o" "$CLAUDE/.credits-cache.json" && rm -f "$dead"
+  exit 0
+fi
 
 # Keep the figures the status line uses; `severity` rides along, unread. The
 # share is the amount spent divided by the limit when the reply has both,

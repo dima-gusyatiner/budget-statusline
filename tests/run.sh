@@ -14,7 +14,7 @@ fails=0
 # Settings left in the shell that runs the suite would change what it sees. The
 # config folder ones matter most: with `CLAUDE_CONFIG_DIR` set, the scripts would
 # keep their state in the real folder it names, not in the scratch `HOME`.
-unset CC_WIDTH CC_ENTERPRISE CC_SPEND_DOLLARS CC_SPEND_CAP CC_SPEND_PERIOD CC_USAGE_FLOOR CC_ASCII COLUMNS
+unset CC_WIDTH CC_ENTERPRISE CC_SPEND_DOLLARS CC_SPEND_CAP CC_SPEND_PERIOD CC_USAGE_FLOOR CC_CREDITS CC_ASCII COLUMNS
 unset CLAUDE_CONFIG_DIR
 # The locale too: the suite reads numbers and dates in the C locale, and a check
 # that wants another one sets it.
@@ -172,21 +172,23 @@ check enterprise-quiet-stderr "[$err]" "[]"
 
 # The date above only exercises the month the suite happens to run in, and a
 # wrong fix that skips the leading-zero strip passes in October and fails in
-# August and September (08 and 09 are bad octal). So run the real `monthreset()`
-# for all twelve months. A `date` shim fakes only the clock reads, in UTC.
+# August and September (08 and 09 are bad octal). So run the real `monthreset()`,
+# and the refresher's `nextmonth()` for usage credits, for all twelve months. A
+# `date` shim fakes only the clock reads, in UTC for the one and in local time
+# for the other.
 B=$(mktemp -d); real_date=$(command -v date)
 cat > "$B/date" <<'EOF'
 #!/bin/sh
 case "$*" in
-  "-u +%Y") echo "$FAKE_Y" ;;
-  "-u +%m") echo "$FAKE_M" ;;
+  "-u +%Y"|"+%Y") echo "$FAKE_Y" ;;
+  "-u +%m"|"+%m") echo "$FAKE_M" ;;
   *) exec "$REAL_DATE" "$@" ;;
 esac
 EOF
 chmod +x "$B/date"
 # `monthreset()` leaves the next boundary in `$mr` and this month's start in `$ms`,
 # worked out from the month's length, so leap years count too.
-for fn in "monthreset:-u:$sl"; do
+for fn in "monthreset:-u:$sl" "nextmonth::$here/../usage-refresh.sh"; do
   f=${fn%%:*} r=${fn#*:}; u=${r%%:*}; body=$(sed -n "/^$f()/,/^}/p" "${r#*:}")
   call=$f; [ "$f" = monthreset ] && call='monthreset; printf "%s %s" "$mr" "$ms"'
   bad=
@@ -557,6 +559,16 @@ has "$out" '· 5h ' || bad=" [drew: $out]"; [ -s "$H/err" ] && bad="$bad [stderr
 verdict corrupt-record-starts-over "$bad"
 rm -rf "$H"
 
+# Behind a gateway the refresher never runs, not even for a full 5-hour window
+# in the same payload: no attempt written, no refresher started, no credits.
+home; bad=
+out=$(printf '{"workspace":{"current_dir":"%s"},"rate_limits":{"spend_limit":{"used_percentage":40,"resets_at":%s},"five_hour":{"used_percentage":100,"resets_at":%s}}}' \
+        "$H" "$(( $(date +%s) + 200000 ))" "$(( $(date +%s) + 3600 ))" | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" | strip)
+has "$out" '¤' && bad=" [drew: $out]"; [ -e "$H/.claude/.usage-attempt" ] && bad="$bad [an attempt was written]"
+sleep 1; [ -e "$H/started" ] && bad="$bad [the refresher started]"
+verdict gateway-never-starts-the-refresher "$bad"
+rm -rf "$H"
+
 # --- narrow terminals ---
 # A scratch repository gives the git group a known branch, written by hand so a
 # non-ASCII name reaches the file as bytes, with no argument conversion on Windows.
@@ -742,12 +754,12 @@ faketok=FAKE-ACCESS-TOKEN-0123456789
 again() {  # again [VAR=value...]: run the real refresher in $RH, keeping its state
   t=$(date +%s)   # a 429 is dated from the start of this run
   env HOME="$RH" PATH="$R/bin:$PATH" FAKE_LOG="$R/log" FAKE_TOKEN="$faketok" "$@" \
-    "$shell" "$here/../usage-refresh.sh" 12.5 2.1.252 </dev/null
+    "$shell" "$here/../usage-refresh.sh" "${ARGS1:-12.5}" "${ARGS2:-2.1.252}" ${ARGS3:+"$ARGS3" "$ARGS4"} </dev/null
 }
-clean() { rm -rf "$RH"/.claude/.usage-* "$R"/log/*; }
+clean() { rm -rf "$RH"/.claude/.usage-* "$RH"/.claude/.credits-* "$R"/log/*; }
 refresh() { clean; again "$@"; }   # the same, from scratch
 away() {  # away <streak> <seconds>: is the last 429 written down as that? A slow machine only adds to it.
-  read -r w u n < "$RH/.claude/.usage-unavailable" 2>/dev/null; d=$(( ${u:-0} - t )); got="$w $n, $d s"
+  read -r w u n < "$RH/.claude/${DEAD:-.usage-unavailable}" 2>/dev/null; d=$(( ${u:-0} - t )); got="$w $n, $d s"
   [ "$w" = throttled ] && [ "$n" = "$1" ] && [ "$d" -ge $(($2 - 1)) ] && [ "$d" -le $(($2 + 5)) ]
 }
 body='{"spend":{"percent":42.3,"used":{"amount_minor":8460},"limit":{"amount_minor":20000},"severity":"ok"}}'
@@ -897,6 +909,32 @@ else
   rm -rf "$lk"
   verdict refresh-takeover-is-atomic "$bad"
 
+  # Credits mode keeps the extra_usage part, in files of its own: the enterprise
+  # snapshot file would mark the machine as an enterprise seat.
+  ARGS1=1.5 ARGS2=2.1.287 ARGS3=credits ARGS4=s1
+  cbody='{"five_hour":{"utilization":100,"resets_at":null},"extra_usage":{"is_enabled":true,"monthly_limit":5000,"used_credits":1250.0,"utilization":25.0,"currency":"USD"}}'
+  refresh FAKE_CURL_BODY="$cbody"; bad=
+  got=$(jq -c '[.enabled,.used_minor,.limit_minor,(.percent|floor),.currency,.spend_seen,.session]' "$RH/.claude/.credits-cache.json" 2>&1)
+  [ "$got" = '[true,1250,5000,25,"USD","1.5","s1"]' ] || bad=" [kept: $got]"
+  e=$(jq -r .resets_at "$RH/.claude/.credits-cache.json" 2>/dev/null)
+  [ "$(date -r "$e" +%d 2>/dev/null || date -d "@$e" +%d 2>/dev/null)" = 01 ] || bad="$bad [reset not on the 1st]"
+  [ ! -e "$RH/.claude/.usage-cache.json" ] || bad="$bad [wrote the enterprise latch]"
+  again FAKE_CURL_BODY='{"five_hour":{"utilization":100},"extra_usage":null}'
+  [ "$(jq -c '[.enabled,.used_minor]' "$RH/.claude/.credits-cache.json" 2>&1)" = '[false,null]' ] || bad="$bad [no credits block is not off]"
+  # The share is kept only as a number and the currency only as a string, so the
+  # cache never holds an array the line would read as several words.
+  refresh FAKE_CURL_BODY='{"five_hour":{"utilization":100},"extra_usage":{"is_enabled":true,"monthly_limit":5000,"used_credits":1250,"utilization":["x","touch","/x"],"currency":{"a":1}}}'
+  got=$(jq -c '[.percent,.currency]' "$RH/.claude/.credits-cache.json" 2>&1)
+  [ "$got" = '[null,"USD"]' ] || bad="$bad [kept from odd types: $got]"
+  verdict refresh-credits-keeps-the-figures "$bad"
+  refresh FAKE_CURL_BODY='{"error":{"type":"not_found_error"}}'; bad=
+  [ "$(head -1 "$RH/.claude/.credits-unavailable" 2>&1)" = api ] || bad=" [not a usage reply]"
+  [ ! -e "$RH/.claude/.usage-unavailable" ] || bad="$bad [wrote the enterprise failure file]"
+  DEAD=.credits-unavailable; again FAKE_CURL_CODE=429; away 1 300 || bad="$bad [429: $got]"; DEAD=
+  again FAKE_CURL_BODY="$cbody"; [ ! -e "$RH/.claude/.credits-unavailable" ] || bad="$bad [a success left the failure]"
+  verdict refresh-credits-fail-in-their-own-file "$bad"
+  ARGS1= ARGS2= ARGS3= ARGS4=
+
   # The Enterprise share is the amount divided by the limit when both are there,
   # because spend.percent comes rounded (1 for 297 of 20000); else spend.percent.
   # A usage reply with neither is "nofigure", not "api"; a reply that is not a
@@ -1012,11 +1050,137 @@ else
   echo "ok   keychain-name-normalizes (skipped: no perl Unicode::Normalize here)"
 fi
 
+# --- usage credits: a subscription window at or past 100% ---
+# The same stand-in refresher. `LC_ALL=C` pins the month name. Each check that
+# wants no call starts with no recent call, so the 5-minute gap cannot hide one.
+home; C=$H
+nextreset=$(sh -c "$(sed -n '/^nextmonth()/,/^}/p' "$here/../usage-refresh.sh"); nextmonth")
+cpay() {  # cpay <5h %> <5h reset> <7d %>: a subscription payload, session s1 at $1.50
+  printf '{"session_id":"s1","version":"2.1.287","cost":{"total_cost_usd":1.5},"workspace":{"current_dir":"%s"},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":%s,"resets_at":%s}}}' \
+    "$C" "$1" "$2" "$3" "$(( $(date +%s) + 200000 ))"
+}
+cred() {  # cred <5h %> [VAR=value...]: one render, keeping the attempt file as it was before
+  p=$1; shift; rm -f "$C/started"; cp "$C/.claude/.usage-attempt" "$C/before" 2>/dev/null || : > "$C/before"
+  cpay "$p" "$(( $(date +%s) + 7200 ))" 62 | env HOME="$C" CC_WIDTH=0 LC_ALL=C "$@" "$shell" "$C/statusline.sh"
+}
+credcache() {  # credcache <age> <enabled> <used> <limit> <percent> [currency] [spend seen] [session]
+  printf '{"fetched_at":%s,"enabled":%s,"used_minor":%s,"limit_minor":%s,"percent":%s,"currency":"%s","resets_at":%s,"spend_seen":"%s","session":"%s"}\n' \
+    "$(( $(date +%s) - $1 ))" "$2" "$3" "$4" "$5" "${6:-USD}" "$nextreset" "${7:-1.5}" "${8:-s1}" > "$C/.claude/.credits-cache.json"
+}
+noatt()  { rm -f "$C/.claude/.usage-attempt"; }
+recent() { attempt $(( $(date +%s) - 60 )); }      # a call a minute ago, so no new one muddies the drawing
+call="1.5 2.1.287 credits s1"
+quiet() {  # quiet <name> <5h %> [VAR=value...]: no ¤ drawn and no call
+  n=$1 p=$2; shift 2; noatt; out=$(cred "$p" "$@" | strip); bad=
+  has "$out" '¤' && bad=" [drew: $out]"; nocall || bad="$bad [called]"; verdict "$n" "$bad"
+}
+quiet credits-not-below-100 99
+noatt; out=$(cred 100 | strip); bad=; like "$out" '*5h ??:?? 100% · 7d ??? 62% · ¤credits' || bad=" [drew: $out]"
+{ calls && [ "$(cat "$C/started")" = "$call" ]; } || bad="$bad [called with: $(cat "$C/started" 2>/dev/null)]"
+verdict credits-at-100-ask-with-session-and-spend "$bad"
+# While the first figure is on its way nobody has to act, so ¤credits is dim,
+# like the cap's placeholder.
+recent; bad=; has "$(cred 100)" "${E}[2m¤credits" || bad=" [not dim: $(cred 100 | strip)]"
+verdict credits-placeholder-is-dim "$bad"
+# A full window past its reset, with no newer one known, is over: no credits.
+noatt; rm -f "$C/.claude"/.rl-*
+out=$(cpay 100 "$(( $(date +%s) - 60 ))" 62 | env HOME="$C" CC_WIDTH=0 LC_ALL=C "$shell" "$C/statusline.sh" | strip)
+check credits-not-for-a-window-past-its-reset "$out" '5h reset' '¤'
+quiet credits-0-turns-it-off 100 CC_CREDITS=0
+printf '{\n  "cachedExtraUsageDisabledReason": "org_level_disabled"\n}\n' > "$C/.claude.json"
+quiet credits-off-for-the-account 104.5
+printf '{\n  "cachedExtraUsageDisabledReason": null\n}\n' > "$C/.claude.json"
+# Dollars spent this month, coloured by how close they are to the monthly
+# limit (green, yellow from 50%, red from 80%), in the account's currency.
+recent; bad=
+credcache 30 true 1250 5000 25; like "$(cred 100 | strip)" '*· ¤$12.50' || bad=" [text]"
+has "$(cred 100)" "${E}[32m¤\$12.50" || bad="$bad [25%]"
+credcache 30 true 3000 5000 60; has "$(cred 100)" "${E}[33m¤\$30.00" || bad="$bad [60%]"
+credcache 30 true 4500 5000 90; has "$(cred 100)" "${E}[31m¤\$45.00" || bad="$bad [90%]"
+credcache 30 true 1250 null null EUR; like "$(cred 100 | strip)" '*· ¤12.50 EUR' || bad="$bad [EUR]"
+verdict credits-in-dollars "$bad"
+# A cache with hostile values: nothing in it runs, and nothing odd is drawn.
+recent; bad=
+printf '{"fetched_at":%s,"enabled":true,"used_minor":1250,"limit_minor":null,"percent":null,"currency":"US\\"; system(\\"touch %s/pwned\\") #"}\n' "$(date +%s)" "$C" > "$C/.claude/.credits-cache.json"
+like "$(cred 100 | strip)" '*· ¤$12.50' || bad=" [odd currency]"
+printf '{"fetched_at":%s,"enabled":true,"used_minor":"1250; system(\\"touch %s/pwned\\")","limit_minor":null}\n' "$(date +%s)" "$C" > "$C/.claude/.credits-cache.json"
+out=$(cred 100 | strip); { has "$out" '¤credits' && ! has "$out" '$'; } || bad="$bad [odd amount: $out]"
+# An array would come out of @sh as several words and run as a command (from
+# the folder of the render: here $C), an object would fail the read. Neither may.
+printf '{"fetched_at":%s,"enabled":true,"used_minor":1250,"limit_minor":5000,"percent":["x","touch","%s/pwned"],"currency":"USD"}\n' "$(date +%s)" "$C" > "$C/.claude/.credits-cache.json"
+out=$(cd "$C" && cred 100 | strip); like "$out" '*· ¤$12.50' || bad="$bad [an array: $out]"
+printf '{"fetched_at":%s,"enabled":true,"used_minor":1250,"limit_minor":5000,"percent":25,"currency":{"x":["touch","%s/pwned"]}}\n' "$(date +%s)" "$C" > "$C/.claude/.credits-cache.json"
+out=$(cd "$C" && cred 100 | strip); like "$out" '*· ¤$12.50' || bad="$bad [an object: $out]"
+{ [ ! -e "$C/pwned" ] && [ ! -e "$C/eol=1" ]; } || bad="$bad [it ran a command]"
+verdict credits-hostile-cache-is-harmless "$bad"
+# Off on the server's word: nothing drawn, fresh or old, and asked at most hourly.
+bad=
+recent; credcache 30 false 0 null null;   has "$(cred 100 | strip)" '¤' && bad=" [fresh]"
+noatt;  credcache 1000 false 0 null null; cred 100 >/dev/null; nocall || bad="$bad [called within the hour]"
+noatt;  credcache 4000 false 0 null null; has "$(cred 100 | strip)" '¤' && bad="$bad [old]"
+{ calls && [ "$(cat "$C/started")" = "$call" ]; } || bad="$bad [not called after the hour]"
+verdict credits-off-in-the-reply "$bad"
+# No figure: say why, from credits' own failure file. The enterprise file does
+# not hold credits back.
+rm -f "$C/.claude/.credits-cache.json"; bad=
+for row in 'login:¤login' 'throttled:¤throttled' 'api:¤api moved' 'nocurl:¤no curl'; do
+  w=${row%%:*}; [ "$w" = throttled ] && w="throttled $(( $(date +%s) + 600 )) 1"
+  printf '%s\n' "$w" > "$C/.claude/.credits-unavailable"; recent
+  out=$(cred 100 | strip); { has "$out" "${row#*:}" && ! has "$out" '¤credits'; } || bad="$bad [${row%%:*}: $out]"
+done
+rm -f "$C/.claude/.credits-unavailable"; why api; noatt
+cred 100 >/dev/null; { calls && [ "$(cat "$C/started")" = "$call" ]; } || bad="$bad [held back by the enterprise file]"
+rm -f "$C/.claude/.usage-unavailable"
+verdict credits-say-why "$bad"
+# No refresher for the credits either: said, in yellow.
+mv "$C/usage-refresh.sh" "$C/usage-refresh.off"; noatt; rm -f "$C/.claude/.credits-cache.json" "$C/.claude/.credits-unavailable"; bad=
+has "$(cred 100)" "${E}[33m¤no refresher" || bad=" [drew: $(cred 100 | strip)]"
+mv -f "$C/usage-refresh.off" "$C/usage-refresh.sh"; rm -f "$C/.claude/.credits-unavailable"
+verdict credits-no-refresher-says-so "$bad"
+# When to ask again: 5 minutes after spend, in this session or another; half an hour without.
+bad=
+noatt; credcache 400  true 1250 5000 25 USD 1.5 s1; cred 100 >/dev/null; nocall || bad=" [no spend, called]"
+noatt; credcache 400  true 1250 5000 25 USD 1.2 s1; cred 100 >/dev/null; calls || bad="$bad [spend since]"
+noatt; credcache 400  true 1250 5000 25 USD 1.5 s2; cred 100 >/dev/null; calls || bad="$bad [another session]"
+noatt; credcache 2000 true 1250 5000 25 USD 1.5 s1; cred 100 >/dev/null; calls || bad="$bad [half an hour]"
+verdict credits-ask-after-spend "$bad"
+# An older figure shows no age, in the narrowest form either; past an hour it
+# is not drawn. A full week counts as much as a full five hours.
+recent; bad=; credcache 700 true 1250 5000 25
+like "$(cred 100 | strip)" '*¤$12.50' || bad=" [full: $(cred 100 | strip)]"
+like "$(cred 100 CC_WIDTH=18 | strip)" '*¤$12.50' || bad="$bad [narrow: $(cred 100 CC_WIDTH=18 | strip)]"
+credcache 4000 true 1250 5000 25; out=$(cred 100 | strip); { has "$out" '¤credits' && ! has "$out" '$12'; } || bad="$bad [past the hour]"
+credcache 30 true 1250 5000 25
+like "$(cpay 12 "$(( $(date +%s) + 7200 ))" 100 | env HOME="$C" CC_WIDTH=0 LC_ALL=C "$shell" "$C/statusline.sh" | strip)" '*7d ??? 100% · ¤$*' || bad="$bad [full week]"
+verdict credits-old-figure-and-week "$bad"
+# The same for the usage credits: a failure after the figure was fetched shows
+# beside it.
+recent; credcache 300 true 1250 5000 25; printf 'login\n%s\n' "$(date +%s)" > "$C/.claude/.credits-unavailable"; bad=
+like "$(cred 100 | strip)" '*· ¤$12.50 login' || bad=" [drew: $(cred 100 | strip)]"
+rm -f "$C/.claude/.credits-unavailable"
+verdict credits-newer-failure-shows-beside "$bad"
+# A credits cache whose month is over holds last month's spend, however young:
+# not drawn, and asked for again.
+noatt; printf '{"fetched_at":%s,"enabled":true,"used_minor":4500,"limit_minor":5000,"percent":90,"currency":"USD","resets_at":%s,"spend_seen":"1.5","session":"s1"}\n' \
+  "$(( $(date +%s) - 300 ))" "$(( $(date +%s) - 60 ))" > "$C/.claude/.credits-cache.json"
+out=$(cred 100 | strip); bad=; has "$out" '$45.00' && bad=" [drew: $out]"; calls || bad="$bad [not asked]"
+verdict credits-last-month-is-not-drawn "$bad"
+# Plain ASCII: + for the credits sign.
+recent; bad=; credcache 700 true 1250 5000 25
+like "$(cred 100 CC_ASCII=1 | strip)" '* | +$12.50' || bad=" [figure: $(cred 100 CC_ASCII=1 | strip)]"
+rm -f "$C/.claude/.credits-cache.json"; printf 'login\n' > "$C/.claude/.credits-unavailable"; recent
+like "$(cred 100 CC_ASCII=1 | strip)" '* | +login' || bad="$bad [reason]"
+rm -f "$C/.claude/.credits-unavailable"; recent
+like "$(cred 100 CC_ASCII=1 | strip)" '* | +credits' || bad="$bad [on its way]"
+verdict ascii-credits "$bad"
+rm -rf "$C"
+
 # --- several sessions: one record per window (see "one record per window" in `statusline.sh`) ---
 # A `date` shim fakes the clock for `date +%s` alone (`FAKE_NOW`), so a window can
 # be played through in a moment; every other call reaches the real date. Each
 # render names its session, so two sessions on one machine can take turns.
 W=$(mktemp -d); mkdir -p "$W/bin" "$W/home/.claude"; cp "$sl" "$W/statusline.sh"
+printf '#!/bin/sh\n' > "$W/usage-refresh.sh"; chmod +x "$W/usage-refresh.sh"    # a stand-in that does nothing
 printf '#!/bin/sh\n[ "$*" = "+%%s" ] && [ -n "${FAKE_NOW:-}" ] && { echo "$FAKE_NOW"; exit 0; }\nexec "%s" "$@"\n' "$(command -v date)" > "$W/bin/date"
 chmod +x "$W/bin/date"
 T0=1800000000
@@ -1087,6 +1251,15 @@ out=$(printf '%s' "$raw" | strip)
 { like "$out" '* · 5h reset' && has "$raw" "${E}[2m5h reset"; } || bad="$bad [an old window: $out]"
 has "$raw" '↯' && bad="$bad [a burn estimate on an old window]"
 verdict a-window-past-its-reset-is-over "$bad"
+# The usage credits follow the window drawn: an idle session that draws the
+# record's newer window at 100% shows ¤credits, though its own window is over.
+anew; rm -f "$W/home/.claude/.usage-attempt" "$W/home/.claude/.credits-cache.json"; bad=
+wl $T0 A five_hour 95 $((T0 + 600)) >/dev/null
+wl $((T0 + 1200)) B five_hour 100 $((T0 + 18600)) >/dev/null
+out=$(wl $((T0 + 1260)) A five_hour 95 $((T0 + 600)) | strip)
+like "$out" '*5h ??:?? 100% · ¤credits' || bad=" [drew: $out]"
+verdict credits-follow-the-window-drawn "$bad"
+rm -f "$W/home/.claude/.usage-attempt"
 # The rate. A steady climb, a point every 2 minutes from 40%, drawn every minute:
 # from 50% the estimate is there at every render, never blank, and within a
 # quarter of the truth. A burst of 10 points in 5 minutes then shortens it, red.
@@ -1147,6 +1320,14 @@ for c in 30:1m 119:1m 1500:25m 3599:59m 3600:1h 3959:1h 3960:1.1h 5400:1.5h 3599
   got=$(eta "${c%%:*}"); [ "$got" = "${c#*:}" ] || bad="$bad [${c%%:*}s: ${got:-none}, not ${c#*:}]"
 done
 verdict burn-estimate-digits "$bad"
+# The credits check reads the freshest figure: an idle session still on 97%,
+# while another has seen 100%, draws 100% and asks for the credits figures.
+anew; bad=
+wl $T0 A five_hour 100 $((T0 + 3600)) >/dev/null; rm -f "$W/home/.claude/.usage-attempt"
+out=$(wl $((T0 + 60)) B five_hour 97 $((T0 + 3600)) | strip)
+like "$out" '*5h ??:?? 100% · ¤credits' || bad=" [drew: $out]"
+[ -e "$W/home/.claude/.usage-attempt" ] || bad="$bad [did not ask]"
+verdict credits-from-the-freshest-figure "$bad"
 rm -rf "$W"
 
 # --- plain ASCII ---
