@@ -67,7 +67,7 @@ out=$(run subscription.json);           match subscription-5h   "$out" '* · 5h 
                                         check model-then-effort "$out" "Opus 5 (1M) ◊high · ctx" "· ◊"
 out=$(run effort-only.json);            check effort-alone      "$out" " · ◊high · ctx 880" "Opus"
 # The colour bands, wherever a share is drawn: green under 50%, yellow from
-# 50%, red from 80%. Each render gets a fresh `HOME`.
+# 50%, red from 80%. Each render gets a fresh `HOME`, so no record carries over.
 bands() {  # bands <ctx %> <5h %> <7d %>: one render, escape codes and all
   H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
   printf '{"workspace":{"current_dir":"%s"},"context_window":{"total_input_tokens":5,"used_percentage":%s},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":%s,"resets_at":%s}}}' \
@@ -151,7 +151,7 @@ verdict ledger-adds-sessions-and-periods "$bad"
 # counts only what it spends after it: its line from the last period is its
 # base. Another session's line from the last period is its base too, and not
 # counted. A line not seen for 8 days goes.
-now=$(date +%s); bad=
+now=$(date +%s); rm -f "$L/.claude"/.rl-*; bad=
 printf '20000101 s 40.0000 0.0000 %s\n20000101 b 10.0000 0.0000 %s\n20000101 z 5.0000 0.0000 %s\n' \
   "$now" "$now" "$(( now - 777600 ))" > "$L/.claude/.spend-ledger"
 out=$(lpay s 40 CC_SPEND_CAP=50); has "$out" '· $0.00/50 0%' || bad=" [no spend since: $out]"
@@ -160,6 +160,15 @@ out=$(lpay b 13 CC_SPEND_CAP=50); has "$out" '· $5.50/50 11%' || bad="$bad [the
 grep -q ' z ' "$L/.claude/.spend-ledger" && bad="$bad [a line not seen for 8 days kept]"
 verdict ledger-counts-only-this-periods-spend "$bad"
 rm -rf "$L"
+# A record with a field such as 08, which arithmetic would read as bad octal and
+# end the script under dash, is started over: the window still draws, quietly.
+H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"; r=$(( $(date +%s) + 3600 ))
+printf '%s 08 08 08 09 0\n' "$r" > "$H/.claude/.rl-5h-state"
+out=$(printf '{"workspace":{"current_dir":"%s"},"rate_limits":{"five_hour":{"used_percentage":30,"resets_at":%s}}}' "$H" "$r" \
+      | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" 2>"$H/err" | strip); bad=
+has "$out" '· 5h ' || bad=" [drew: $out]"; [ -s "$H/err" ] && bad="$bad [stderr: $(head -1 "$H/err")]"
+verdict corrupt-record-starts-over "$bad"
+rm -rf "$H"
 
 # --- narrow terminals ---
 # A scratch repository gives the git group a known branch, written by hand so a
@@ -286,6 +295,143 @@ out=$(printf '{"workspace":{"current_dir":"%s/repo"}}' "$I" | env HOME="$I/home"
 bad=; [ "$(idx)" = "$before" ] || bad=" [the index was rewritten]"; has "$out" 'git:(' || bad="$bad [drew: $out]"
 verdict render-leaves-the-index-alone "$bad"
 rm -rf "$I"
+
+# --- several sessions: one record per window (see "one record per window" in `statusline.sh`) ---
+# A `date` shim fakes the clock for `date +%s` alone (`FAKE_NOW`), so a window can
+# be played through in a moment; every other call reaches the real date. Each
+# render names its session, so two sessions on one machine can take turns.
+W=$(mktemp -d); mkdir -p "$W/bin" "$W/home/.claude"; cp "$sl" "$W/statusline.sh"
+printf '#!/bin/sh\n[ "$*" = "+%%s" ] && [ -n "${FAKE_NOW:-}" ] && { echo "$FAKE_NOW"; exit 0; }\nexec "%s" "$@"\n' "$(command -v date)" > "$W/bin/date"
+chmod +x "$W/bin/date"
+T0=1800000000
+wl() {  # wl <time> <session> <five_hour|seven_day> <percent> <reset> [VAR=value...]: one render, escape codes and all
+  w_t=$1 w_s=$2 w_k=$3 w_p=$4 w_r=$5; shift 5
+  printf '{"session_id":"%s","workspace":{"current_dir":"%s"},"rate_limits":{"%s":{"used_percentage":%s,"resets_at":%s}}}' \
+    "$w_s" "$W" "$w_k" "$w_p" "$w_r" | env PATH="$W/bin:$PATH" FAKE_NOW="$w_t" HOME="$W/home" CC_WIDTH=0 LC_ALL=C "$@" "$shell" "$W/statusline.sh"
+}
+rec() { cat "$W/home/.claude/.rl-$1-state" 2>/dev/null; }    # rec <key>: the record, one line
+anew() { rm -f "$W/home/.claude"/.rl-*; }
+mins() {  # mins <line>: the burn estimate in whole minutes, or nothing
+  printf '%s' "$1" | strip | LC_ALL=C awk '{ if (match($0, /↯[0-9.]+[mhd]/)) {
+    s = substr($0, RSTART + 3, RLENGTH - 3); n = substr(s, 1, length(s) - 1) + 0
+    if (s ~ /h$/) n = int(n * 60 + 0.5); else if (s ~ /d$/) n = n * 1440
+    print n } }'
+}
+# Two sessions on one machine. A works and climbs a point every 7.5 minutes; B
+# sits idle on the 45% it heard last and draws in between, as refreshInterval
+# has it. Read as a reset, B's lower figure would make A's next render measure a
+# jump: a red ↯ of minutes in a window far from full. Here nothing may be red,
+# the record keeps A's figure, and B draws it.
+anew; t=$T0 rs=$((T0 + 10800)) bad=
+wl $t B five_hour 45 $rs >/dev/null
+t=$((t + 30)); wl $t A five_hour 50 $rs >/dev/null
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  t=$((t + 300)); has "$(wl $t A five_hour $((50 + i)) $rs)" "${E}[31m↯" && bad="$bad [A red at $((50 + i))%]"
+  t=$((t + 150)); raw=$(wl $t B five_hour 45 $rs); out=$(printf '%s' "$raw" | strip)
+  like "$out" "*5h ??:?? $((50 + i))%*" || bad="$bad [B drew: $out]"
+  has "$raw" "${E}[31m↯" && bad="$bad [B red at $((50 + i))%]"
+done
+set -- $(rec 5h); [ "${5:-}" = 62 ] || bad="$bad [record: $(rec 5h)]"
+verdict two-sessions-one-stale "$bad"
+# A new window is a later reset time, not a drop. 30% then 29% with a reset 5
+# hours on starts a new record; 60% then 20% with the same reset, give or take
+# 2 minutes, keeps it, and the session on 20% draws 60%. A reset more than 10
+# minutes earlier is a session still on the last window: it draws its own
+# figure and leaves the record alone.
+anew; bad=
+wl $T0 A five_hour 30 $((T0 + 3600)) >/dev/null
+wl $((T0 + 3700)) A five_hour 29 $((T0 + 21600)) >/dev/null
+set -- $(rec 5h); [ "${1:-} ${5:-}" = "$((T0 + 21600)) 29" ] || bad=" [after a reset: $(rec 5h)]"
+anew; wl $T0 A five_hour 60 $((T0 + 3600)) >/dev/null
+out=$(wl $((T0 + 60)) B five_hour 20 $((T0 + 3720)) | strip)
+set -- $(rec 5h); [ "${1:-} ${5:-}" = "$((T0 + 3600)) 60" ] || bad="$bad [after a drop: $(rec 5h)]"
+like "$out" '*5h ??:?? 60%*' || bad="$bad [the session on 20% drew: $out]"
+out=$(wl $((T0 + 90)) C five_hour 90 $((T0 + 2700)) | strip)
+{ like "$out" '*5h ??:?? 90%*' && [ "$(set -- $(rec 5h); echo "${5:-}")" = 60 ]; } || bad="$bad [the last window: $out, $(rec 5h)]"
+verdict a-new-window-is-a-later-reset-time "$bad"
+# Nobody has shown the record's figure for 30 minutes: a session draws its own.
+# That is how a figure the server lowers gets in.
+out=$(wl $((T0 + 1900)) B five_hour 20 $((T0 + 3600)) | strip); bad=
+like "$out" '*5h ??:?? 20%' || bad=" [drew: $out]"
+verdict a-stale-record-gives-way "$bad"
+# A window whose reset has passed is over. An idle session still on one draws
+# the newer window another session has seen, in that window's colour, and leaves
+# the record alone. With no newer window known it reads "5h reset", dim: no old
+# figure, no old stamp, no burn estimate.
+anew; bad=
+wl $T0 A five_hour 95 $((T0 + 600)) >/dev/null
+wl $((T0 + 1200)) B five_hour 3 $((T0 + 18600)) >/dev/null
+raw=$(wl $((T0 + 1260)) A five_hour 95 $((T0 + 600))); out=$(printf '%s' "$raw" | strip)
+like "$out" '*5h ??:?? 3%' || bad=" [drew: $out]"
+has "$raw" "${E}[32m5h " || bad="$bad [not green]"
+set -- $(rec 5h); [ "${1:-} ${5:-}" = "$((T0 + 18600)) 3" ] || bad="$bad [record: $(rec 5h)]"
+anew; wl $T0 A five_hour 90 $((T0 + 600)) >/dev/null; wl $((T0 + 300)) A five_hour 95 $((T0 + 600)) >/dev/null
+raw=$(wl $((T0 + 1200)) A five_hour 95 $((T0 + 600)))
+out=$(printf '%s' "$raw" | strip)
+{ like "$out" '* · 5h reset' && has "$raw" "${E}[2m5h reset"; } || bad="$bad [an old window: $out]"
+has "$raw" '↯' && bad="$bad [a burn estimate on an old window]"
+verdict a-window-past-its-reset-is-over "$bad"
+# The rate. A steady climb, a point every 2 minutes from 40%, drawn every minute:
+# from 50% the estimate is there at every render, never blank, and within a
+# quarter of the truth. A burst of 10 points in 5 minutes then shortens it, red.
+# An idle hour after that lets it fade, longer at each look, never blank, until
+# it is dim.
+anew; t=$T0 rs=$((T0 + 14400)) p=40 m=0 bad=
+while [ "$m" -le 44 ]; do
+  [ "$m" -gt 0 ] && [ $((m % 2)) = 0 ] && p=$((p + 1))
+  e=$(mins "$(wl $t A five_hour $p $rs)")
+  if [ "$p" -ge 50 ]; then
+    truth=$(( (100 - p) * 2 ))
+    if [ -z "$e" ]; then bad="$bad [blank at minute $m]"
+    elif [ $((e * 4)) -lt $((truth * 3)) ] || [ $((e * 4)) -gt $((truth * 5)) ]; then bad="$bad [minute $m: ${e}m, truth ${truth}m]"; fi
+  fi
+  t=$((t + 60)); m=$((m + 1))
+done
+before=$e
+for i in 1 2 3 4 5; do p=$((p + 2)); raw=$(wl $t A five_hour $p $rs); t=$((t + 60)); done
+e=$(mins "$raw")
+{ has "$raw" "${E}[31m↯" && [ "${e:-9999}" -lt "$before" ]; } || bad="$bad [after the burst: $(printf '%s' "$raw" | strip), before ${before}m]"
+prev=$e
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  t=$((t + 300)); raw=$(wl $t A five_hour $p $rs); e=$(mins "$raw")
+  if [ -z "$e" ]; then bad="$bad [blank while idle]"; elif [ "$e" -le "$prev" ]; then bad="$bad [${e}m after ${prev}m]"; fi
+  prev=${e:-$prev}
+done
+has "$raw" "${E}[2m↯" || bad="$bad [still red after an idle hour: $(printf '%s' "$raw" | strip)]"
+verdict the-rate-is-steady-then-fades "$bad"
+# The same estimate in plain ASCII reads ~ for the arrow.
+check ascii-burn-estimate "$(wl $((t + 300)) A five_hour $p $rs CC_ASCII=1 | strip)" "% ~" "↯"
+# The weekly window: a slow, steady overspend, a point an hour from 60% with the
+# reset 60 hours away, so it fills 20 hours early. Nothing below 70%; red from
+# 70%. A point every 4 hours from 70% would not fill in time: dim.
+anew; t=$T0 rs=$((T0 + 216000)) p=60 bad=
+while [ "$p" -le 75 ]; do
+  out=$(wl $t A seven_day $p $rs)
+  if [ "$p" -lt 70 ]; then has "$out" '↯' && bad="$bad [shown at $p%]"
+  else has "$out" "${E}[31m↯" || bad="$bad [not red at $p%: $(printf '%s' "$out" | strip)]"; fi
+  t=$((t + 3600)); p=$((p + 1))
+done
+anew; t=$T0 p=70
+while [ "$p" -le 75 ]; do out=$(wl $t A seven_day $p $rs); t=$((t + 14400)); p=$((p + 1)); done
+has "$out" "${E}[2m↯" || bad="$bad [a slow week: $(printf '%s' "$out" | strip)]"
+verdict weekly-overspend-shows-from-70 "$bad"
+# The estimate's digits: whole minutes under an hour, never under 1m; one
+# decimal under 10 hours, none on a whole hour; whole hours under 2 days; then
+# whole days. Each band rounds down, so a time just short of the next band
+# never prints 60m, 10.0h or 48h. Each case is a record whose pace puts 100%
+# that many seconds away, read with the clock stopped.
+eta() {  # eta <seconds>: the estimate drawn for a 5-hour window at 50% that fills in that many seconds
+  anew; printf '%s %s %s %s 50 %s\n' $((T0 + 10800)) $((T0 - 200000)) "$T0" "$T0" \
+    "$(LC_ALL=C awk -v s="$1" 'BEGIN { printf "%.12g", 50 / (s + 0.5) }')" > "$W/home/.claude/.rl-5h-state"
+  wl "$T0" A five_hour 50 $((T0 + 10800)) | strip | LC_ALL=C awk '{ if (match($0, /↯[^ ]*/)) print substr($0, RSTART + 3, RLENGTH - 3) }'
+}
+bad=
+for c in 30:1m 119:1m 1500:25m 3599:59m 3600:1h 3959:1h 3960:1.1h 5400:1.5h 35999:9.9h 36000:10h \
+         129600:36h 172799:47h 172800:2d 777600:9d 100000000000000:1157407407d; do
+  got=$(eta "${c%%:*}"); [ "$got" = "${c#*:}" ] || bad="$bad [${c%%:*}s: ${got:-none}, not ${c#*:}]"
+done
+verdict burn-estimate-digits "$bad"
+rm -rf "$W"
 
 # --- plain ASCII ---
 # look [VAR=value...]: "ascii" or "symbols", as one subscription render draws
