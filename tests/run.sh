@@ -1,8 +1,8 @@
 #!/bin/sh
-# Tests for `statusline.sh`. POSIX sh, no framework. Each case pipes a payload
-# through the script with `HOME` pointed at a scratch folder, then checks the
-# output with the colour codes stripped. Every failure is counted, and the exit
-# status is the number of failures.
+# Tests for `statusline.sh` and `usage-refresh.sh`. POSIX sh, no framework. Each
+# case pipes a payload through the script with `HOME` pointed at a scratch
+# folder, then checks the output with the colour codes stripped. Every failure
+# is counted, and the exit status is the number of failures.
 set -u
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 sl="$here/../statusline.sh"
@@ -14,7 +14,7 @@ fails=0
 # Settings left in the shell that runs the suite would change what it sees. The
 # config folder ones matter most: with `CLAUDE_CONFIG_DIR` set, the scripts would
 # keep their state in the real folder it names, not in the scratch `HOME`.
-unset CC_WIDTH CC_SPEND_CAP CC_SPEND_PERIOD CC_ASCII COLUMNS
+unset CC_WIDTH CC_ENTERPRISE CC_SPEND_DOLLARS CC_SPEND_CAP CC_SPEND_PERIOD CC_USAGE_FLOOR CC_ASCII COLUMNS
 unset CLAUDE_CONFIG_DIR
 # The locale too: the suite reads numbers and dates in the C locale, and a check
 # that wants another one sets it.
@@ -31,6 +31,9 @@ strip() { LC_ALL=C awk '{ gsub(/\033\]8;;[^\033]*\033\\/, ""); gsub(/\033\[[0-9;
 vis() { printf '%s' "$1" | LC_ALL=C awk '{ gsub(/[\200-\277]/, ""); n += length($0) } END { print n + 0 }'; }
 
 # run <payload> <extra-env...>  -> stripped output on stdout
+# The script is COPIED into the scratch dir and run from there, so its
+# `usage-refresh.sh` sibling is unresolvable: tests must never spawn the real
+# refresher, which reads the real keychain and calls the real endpoint.
 # `CC_WIDTH=0` pins the full line, whatever the width of the terminal running this.
 run() { runraw "$@" | strip; }
 runraw() {  # runraw <payload> <extra-env...>: the same, escape codes and all
@@ -59,6 +62,12 @@ match() {  # match <name> <output> <glob>: like check, but the last argument is 
 verdict() { if [ -z "$2" ]; then echo "ok   $1"; else echo "FAIL $1:$2"; fails=$((fails+1)); fi; }
 has() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }    # has <text> <part>
 like() { case "$1" in $2) return 0 ;; esac; return 1; }       # like <text> <glob>
+# crlfjq <folder>: a `jq` there that ends every line with a carriage return, as a
+# native Windows `jq` does
+crlfjq() {
+  mkdir -p "$1"
+  printf '#!/bin/sh\n"%s" "$@" | awk '"'"'{ printf "%%s\\r\\n", $0 }'"'"'\n' "$(command -v jq)" > "$1/jq"; chmod +x "$1/jq"
+}
 
 # 23.5 rounds to 24 and 62.1 to 62, each with its reset stamp.
 out=$(run subscription.json);           match subscription-5h   "$out" '* · 5h ??:?? 24% · 7d *'
@@ -83,8 +92,8 @@ has "$raw" "${E}[33m50%" || bad="$bad [ctx 50%]"
 has "$raw" "${E}[33m5h " || bad="$bad [50%]"
 has "$raw" "${E}[33m7d " || bad="$bad [79%]"
 verdict colour-bands-green-yellow-red "$bad"
-# The gateway cap's reset: a date when it is more than a day away, the time of
-# day when it is sooner.
+# The gateway cap's reset: a date in the Enterprise cap's style when it is more
+# than a day away, the time of day when it is sooner.
 out=$(run gateway.json);                match gateway-cap       "$out" '*· cap [0-3][0-9]/[A-Z][a-z][a-z] 78%'
 H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
 out=$(printf '{"workspace":{"current_dir":"%s"},"rate_limits":{"spend_limit":{"used_percentage":78.4,"resets_at":%s}}}' "$H" "$(( $(date +%s) + 3600 ))" \
@@ -117,6 +126,10 @@ done
 has "$(run apikey.json CC_SPEND_CAP=0.5)" '· $2.50/0.5 500%' || bad="$bad [0.5: $(run apikey.json CC_SPEND_CAP=0.5)]"
 rm -rf "$X"
 verdict spend-cap-is-checked "$bad"
+out=$(run enterprise.json);             check gate-off-default  "$out" '$0.80' "· cap "
+# Forced on with no snapshot yet: the cap segment, and no dollars. This copy of
+# the script has no refresher beside it, so it says so.
+out=$(run enterprise.json CC_ENTERPRISE=1); check gate-on-nocache "$out" '· cap no refresher' '$0.80'
 
 # A field of the wrong type (an array, an object, a string where an object
 # belongs) leaves that field empty and the rest of the line intact, quietly.
@@ -129,6 +142,374 @@ for odd in '"model":{"display_name":["a","b"]}' '"model":{"display_name":{"x":1}
 done
 rm -rf "$H"; verdict odd-payload-fields-keep-the-line "$bad"
 
+# enterprise with a warm cache: seed the snapshot, expect the cap segment
+H=$(mktemp -d); mkdir -p "$H/.claude"; now=$(date +%s)
+printf '{"fetched_at":%s,"spend_seen":0,"percent":42.3,"used_minor":8460,"limit_minor":20000,"severity":"ok"}\n' "$now" > "$H/.claude/.usage-cache.json"
+cp "$sl" "$H/statusline.sh"
+out=$(sed -e "s|__CWD__|$here|" "$here/payloads/enterprise.json" | env HOME="$H" CC_WIDTH=0 CC_ENTERPRISE=1 "$shell" "$H/statusline.sh" | strip)
+rm -rf "$H"
+check enterprise-cached "$out" "cap "; check enterprise-pct "$out" "42%"
+
+# same seeded cache, NO env var: the latch alone must keep the branch on
+H=$(mktemp -d); mkdir -p "$H/.claude"; now=$(date +%s)
+printf '{"fetched_at":%s,"spend_seen":0,"percent":42.3,"used_minor":8460,"limit_minor":20000,"severity":"ok"}\n' "$now" > "$H/.claude/.usage-cache.json"
+cp "$sl" "$H/statusline.sh"
+out=$(sed -e "s|__CWD__|$here|" "$here/payloads/enterprise.json" | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" | strip)
+rm -rf "$H"
+check enterprise-latch "$out" "42%" '$0.80'
+
+# The reset date comes out of `monthreset()`, which needs plain POSIX arithmetic:
+# bash takes `10#$m` and dash rejects it, and the checks above would still pass
+# under dash with the date gone. So this one wants the date and a silent
+# stderr.
+H=$(mktemp -d); mkdir -p "$H/.claude"; now=$(date +%s)
+printf '{"fetched_at":%s,"spend_seen":0,"percent":42.3,"used_minor":8460,"limit_minor":20000,"severity":"ok"}\n' "$now" > "$H/.claude/.usage-cache.json"
+cp "$sl" "$H/statusline.sh"
+out=$(sed -e "s|__CWD__|$here|" "$here/payloads/enterprise.json" | env HOME="$H" CC_WIDTH=0 CC_ENTERPRISE=1 "$shell" "$H/statusline.sh" 2>"$H/err" | strip)
+err=$(cat "$H/err"); rm -rf "$H"
+match enterprise-reset-date "$out" '*cap [0-3][0-9]/[A-Z][a-z][a-z] 42%*'
+check enterprise-quiet-stderr "[$err]" "[]"
+
+# The date above only exercises the month the suite happens to run in, and a
+# wrong fix that skips the leading-zero strip passes in October and fails in
+# August and September (08 and 09 are bad octal). So run the real `monthreset()`
+# for all twelve months. A `date` shim fakes only the clock reads, in UTC.
+B=$(mktemp -d); real_date=$(command -v date)
+cat > "$B/date" <<'EOF'
+#!/bin/sh
+case "$*" in
+  "-u +%Y") echo "$FAKE_Y" ;;
+  "-u +%m") echo "$FAKE_M" ;;
+  *) exec "$REAL_DATE" "$@" ;;
+esac
+EOF
+chmod +x "$B/date"
+# `monthreset()` leaves the next boundary in `$mr` and this month's start in `$ms`,
+# worked out from the month's length, so leap years count too.
+for fn in "monthreset:-u:$sl"; do
+  f=${fn%%:*} r=${fn#*:}; u=${r%%:*}; body=$(sed -n "/^$f()/,/^}/p" "${r#*:}")
+  call=$f; [ "$f" = monthreset ] && call='monthreset; printf "%s %s" "$mr" "$ms"'
+  bad=
+  for row in 2026-01:2026-02 2026-02:2026-03 2026-03:2026-04 2026-04:2026-05 \
+             2026-05:2026-06 2026-06:2026-07 2026-07:2026-08 2026-08:2026-09 \
+             2026-09:2026-10 2026-10:2026-11 2026-11:2026-12 2026-12:2027-01 \
+             2028-02:2028-03 2100-02:2100-03 2000-02:2000-03; do
+    cur=${row%%:*}; want=${row##*:}
+    out=$(env PATH="$B:$PATH" REAL_DATE="$real_date" FAKE_Y="${cur%-*}" FAKE_M="${cur#*-}" "$shell" -c "$body; $call" 2>&1); e=${out%% *}
+    got=$(date $u -r "$e" +%Y-%m 2>/dev/null || date $u -d "@$e" +%Y-%m 2>/dev/null)
+    [ "$got" = "$want" ] || bad="$bad $cur=>${got:-error}"
+    if [ "$f" = monthreset ]; then
+      st=${out#* }; gs=$(date -u -r "$st" '+%Y-%m-%d %H:%M' 2>/dev/null || date -u -d "@$st" '+%Y-%m-%d %H:%M' 2>/dev/null)
+      [ "$gs" = "$cur-01 00:00" ] || bad="$bad $cur:start=>${gs:-error}"
+    fi
+  done
+  verdict "$f-all-months" "$bad"
+done
+rm -rf "$B"
+
+# --- enterprise seat: the refresh and its failures ---
+# home: a scratch `HOME` with the script copied in and a stand-in `usage-refresh.sh`
+# beside it, which notes its arguments in `$H/started`, so nothing real is called.
+home() {
+  H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
+  printf '#!/bin/sh\necho "$*" >> "${0%%/*}/started"\n' > "$H/usage-refresh.sh"; chmod +x "$H/usage-refresh.sh"
+}
+snap() {  # snap <age> <percent> [spend seen]: an enterprise snapshot
+  printf '{"fetched_at":%s,"spend_seen":%s,"percent":%s,"used_minor":8400,"limit_minor":20000,"severity":"ok"}\n' \
+    "$(( $(date +%s) - $1 ))" "${3:-0}" "$2" > "$H/.claude/.usage-cache.json"
+}
+attempt() { printf '%s\n' "$1" > "$H/.claude/.usage-attempt"; }        # attempt <epoch>: the last call
+why() { printf '%s\n%s\n' "$1" "${2:-$(date +%s)}" > "$H/.claude/.usage-unavailable"; }   # why <reason> [epoch]: the last failure, and when
+ent() {  # ent [VAR=value...]: one enterprise render, keeping the attempt file as it was before
+  cp "$H/.claude/.usage-attempt" "$H/before" 2>/dev/null || : > "$H/before"; rm -f "$H/started"
+  sed -e "s|__CWD__|$here|" "$here/payloads/enterprise.json" | env HOME="$H" CC_WIDTH=0 CC_ENTERPRISE=1 TZ=UTC "$@" "$shell" "$H/statusline.sh" | strip
+}
+# A start always writes the attempt time first, so an unchanged attempt file
+# proves no call without waiting for one that might come late.
+nocall() { cmp -s "$H/before" "$H/.claude/.usage-attempt" || { [ ! -s "$H/before" ] && [ ! -e "$H/.claude/.usage-attempt" ]; }; }
+calls() { i=0; while [ ! -s "$H/started" ] && [ "$i" -lt 10 ]; do sleep 1; i=$((i + 1)); done; [ -s "$H/started" ]; }
+
+home; bad=                       # no snapshot: the first fetch failed, and the reason shows at once
+for row in 'login:cap login' 'nocurl:cap no curl' 'api:cap api moved' 'http 500:cap http 500' 'nofigure:cap no figure' 'expired:cap login' 'tls 60:cap tls' 'offline 7:cap offline'; do
+  why "${row%%:*}"; attempt "$(date +%s)"; has "$(ent)" "${row#*:}" || bad="$bad ${row%%:*}"
+done
+verdict enterprise-first-fetch-says-why "$bad"
+# The names the Enterprise path uses start empty there, so figures exported in
+# the environment cannot stand in for a snapshot: with none yet, the line shows
+# the placeholder, not an exported, fresh-looking 50%.
+rm -f "$H/.claude/.usage-unavailable" "$H/.claude/.usage-attempt" "$H/.claude/.usage-cache.json"
+out=$(ent cp=50 cu=100 cl=20000 cts="$(date +%s)" ucx=1 2>/dev/null); bad=
+{ has "$out" '· cap …' && ! has "$out" '50%'; } || bad=" [drew: $out]"
+verdict environment-cannot-draw-a-figure "$bad"
+rm -f "$H/.claude/.usage-attempt"
+# An expired token is said calmly, in dim: Claude Code renews it on its next
+# request. A reply with no figure for the seat is dim too: nobody here can act.
+entraw() { sed -e "s|__CWD__|$here|" "$here/payloads/enterprise.json" | env HOME="$H" CC_WIDTH=0 CC_ENTERPRISE=1 TZ=UTC "$shell" "$H/statusline.sh"; }
+bad=
+why expired;  attempt "$(date +%s)"; has "$(entraw)" "${E}[2mcap login" || bad=" [expired not dim]"
+why nofigure; attempt "$(date +%s)"; has "$(entraw)" "${E}[2mcap no figure" || bad="$bad [no figure not dim]"
+why login;    attempt "$(date +%s)"; has "$(entraw)" "${E}[33mcap login" || bad="$bad [a rejected login is no longer yellow]"
+why "tls 60"; attempt "$(date +%s)"; has "$(entraw)" "${E}[33mcap tls" || bad="$bad [tls not yellow]"
+why "offline 7"; attempt "$(date +%s)"; has "$(entraw)" "${E}[2mcap offline" || bad="$bad [offline not dim]"
+verdict enterprise-calm-reasons-are-dim "$bad"
+# With no refresher that can run (left out of a manual install, or without its
+# execute bit) the line says so in yellow instead of waiting for ever, with or
+# without an old snapshot; while a first fetch is on its way, a dim placeholder.
+rm -f "$H/.claude/.usage-unavailable" "$H/.claude/.usage-attempt"; out=$(entraw); bad=
+has "$out" "${E}[2mcap …" || bad=" [first fetch: $(printf '%s' "$out" | strip)]"
+mv "$H/usage-refresh.sh" "$H/usage-refresh.off"; rm -f "$H/.claude/.usage-attempt"; out=$(entraw)
+has "$out" "${E}[33mcap no refresher" || bad="$bad [none: $(printf '%s' "$out" | strip)]"
+[ "$(head -1 "$H/.claude/.usage-unavailable" 2>/dev/null)" = norefresher ] || bad="$bad [not recorded]"
+snap 9000 42; rm -f "$H/.claude/.usage-unavailable" "$H/.claude/.usage-attempt"
+has "$(ent)" "· cap no refresher" || bad="$bad [old snapshot: $(ent)]"
+verdict no-refresher-says-so "$bad"
+# The same for a refresher that lost its execute bit. Skipped where a script
+# that starts with #! stays executable whatever its mode (Git Bash).
+cp "$H/usage-refresh.off" "$H/usage-refresh.sh"; chmod 644 "$H/usage-refresh.sh"
+if [ -x "$H/usage-refresh.sh" ]; then
+  echo "ok   no-refresher-not-executable (skipped: a script cannot lose its execute bit here)"
+else
+  rm -f "$H/.claude/.usage-unavailable" "$H/.claude/.usage-attempt"
+  check no-refresher-not-executable "$(ent)" "· cap no refresher"
+fi
+mv -f "$H/usage-refresh.off" "$H/usage-refresh.sh"; chmod 755 "$H/usage-refresh.sh"
+rm -f "$H/.claude/.usage-unavailable" "$H/.claude/.usage-cache.json" "$H/.claude/.rl-spend-state"
+# After an expired token, the next look comes 2 minutes on, not 5: that try sent
+# nothing, and Claude Code renews the token on its next request.
+why expired; bad=
+attempt $(( $(date +%s) - 60 ));  ent >/dev/null; nocall || bad=" [60 s]"
+attempt $(( $(date +%s) - 130 )); ent >/dev/null; calls || bad="$bad [130 s]"
+why login
+attempt $(( $(date +%s) - 130 )); ent >/dev/null; nocall || bad="$bad [a rejected login waits longer]"
+verdict expired-token-looks-again-soon "$bad"
+rm -f "$H/.claude/.usage-unavailable"
+# A snapshot with the share but without the amounts still draws the share; only
+# the dollars need the amounts.
+printf '{"fetched_at":%s,"spend_seen":0,"percent":42,"used_minor":null,"limit_minor":null,"severity":null}\n' "$(date +%s)" > "$H/.claude/.usage-cache.json"
+attempt "$(date +%s)"; out=$(ent CC_SPEND_DOLLARS=1); bad=
+{ has "$out" '42%' && ! has "$out" '$'; } || bad=" [drew: $out]"
+verdict enterprise-share-without-amounts "$bad"
+# `CC_SPEND_DOLLARS` adds the dollars to the monthly figure; 0 means off, as
+# unset does.
+snap 60 42; attempt "$(date +%s)"; bad=
+has "$(ent CC_SPEND_DOLLARS=1)" 'cap 01/' && has "$(ent CC_SPEND_DOLLARS=1)" ' $84.00/200 42%' || bad=" [1: $(ent CC_SPEND_DOLLARS=1)]"
+has "$(ent CC_SPEND_DOLLARS=0)" '$' && bad="$bad [0: $(ent CC_SPEND_DOLLARS=0)]"
+verdict spend-dollars-0-is-off "$bad"
+# One snapshot serves every session, so a lower figure in the same month is the
+# server's newer word (a raised cap), drawn at once, not outvoted by the record.
+snap 60 91; ent >/dev/null; snap 60 45; bad=
+has "$(ent)" '45%' || bad=" [the lower figure was not drawn]"
+verdict enterprise-drop-shows-at-once "$bad"
+rm -f "$H/.claude/.usage-unavailable" "$H/.claude/.rl-spend-state"
+# A figure carries no age, in any width: it is drawn as fetched until it is too
+# old to trust, and then replaced. Here it is 33 minutes old.
+snap 2000 42.3; attempt "$(date +%s)"; bad=
+for w in 0 8; do out=$(ent CC_WIDTH=$w); { has "$out" 'cap ' && has "$out" '42%' && ! has "$out" '42%…'; } || bad="$bad [width $w: $out]"; done
+out=$(ent CC_WIDTH=8 CC_ASCII=1); { has "$out" 'cap 42%' && ! has "$out" '42%..'; } || bad="$bad [ascii: $out]"
+verdict an-old-figure-shows-no-age "$bad"
+# Past three times the floor a figure is not drawn, failure or none: a 6-day-old
+# 100% reads as stale, with its age, in one dim word, not as a full cap. The
+# ASCII line reads the same.
+snap 518400 100; attempt "$(date +%s)"; bad=
+out=$(ent); { has "$out" '· cap 6d-stale' && ! has "$out" '100%'; } || bad=" [drew: $out]"
+has "$(entraw)" "${E}[2mcap 6d-stale" || bad="$bad [not dim]"
+has "$(ent CC_ASCII=1)" '| cap 6d-stale' || bad="$bad [ascii: $(ent CC_ASCII=1)]"
+verdict old-snapshot-reads-stale "$bad"
+# A snapshot is read through the same guard: an array runs nothing, quietly.
+printf '{"fetched_at":%s,"spend_seen":0,"percent":["x","touch","%s/pwned"],"used_minor":8400,"limit_minor":20000}\n' "$(date +%s)" "$H" > "$H/.claude/.usage-cache.json"
+attempt "$(date +%s)"; out=$(cd "$H" && ent 2>&1); bad=
+{ [ ! -e "$H/pwned" ] && [ ! -e "$H/eol=1" ]; } || bad=" [it ran a command]"; has "$out" 'not found' && bad="$bad [stderr: $out]"
+verdict hostile-snapshot-is-harmless "$bad"
+
+# A 429 keeps the last figure, with the word beside it, for at least an hour,
+# and no call goes out before the wait is over; past the hour, "throttled" alone.
+snap 1200 91; why "throttled $(( $(date +%s) + 600 )) 1"; attempt $(( $(date +%s) - 600 ))
+out=$(ent); bad=; like "$out" '*91% throttled' || bad=" [drew: $out]"; nocall || bad="$bad [called]"
+snap 4000 91; has "$(ent)" 'cap throttled' || bad="$bad [past the hour]"
+verdict throttled-keeps-the-figure-and-waits "$bad"
+# A refresh that failed after the snapshot was fetched is said beside the
+# figure at once, in the narrowest form too, whatever the figure's age: here a
+# rejected login behind a 10-minute-old figure. A failure from before the
+# snapshot was fetched is not.
+rm -f "$H/.claude/.rl-spend-state"; snap 600 42; why login; attempt "$(date +%s)"; bad=
+raw=$(entraw); out=$(printf '%s' "$raw" | strip)
+like "$out" '* · cap 01/??? 42% login' || bad=" [drew: $out]"
+has "$raw" "${E}[33mlogin" || bad="$bad [not yellow]"
+has "$(ent CC_WIDTH=8)" 'cap 42% login' || bad="$bad [narrow: $(ent CC_WIDTH=8)]"
+why login $(( $(date +%s) - 900 )); has "$(ent)" 'login' && bad="$bad [an older failure: $(ent)]"
+verdict a-newer-failure-shows-beside-the-figure "$bad"
+rm -f "$H/.claude/.usage-unavailable"
+# At 00:10 UTC on the 1st, a snapshot fetched at 23:50 the day before is last
+# month's: not drawn, however young, and a fresh one is asked for. Its spend
+# seen matches, so only the month can ask. The clock is faked for date +%s
+# alone, at the start of this real UTC month.
+mkdir -p "$H/bin"; printf '#!/bin/sh\n[ "$*" = "+%%s" ] && [ -n "${FAKE_NOW:-}" ] && { echo "$FAKE_NOW"; exit 0; }\nexec "%s" "$@"\n' "$(command -v date)" > "$H/bin/date"; chmod +x "$H/bin/date"
+m1=$(TZ=UTC date -j -f '%Y-%m-%d %H:%M:%S' "$(date -u +%Y-%m)-01 00:00:00" +%s 2>/dev/null || date -u -d "$(date -u +%Y-%m)-01 00:00:00" +%s)
+printf '{"fetched_at":%s,"spend_seen":0.8,"percent":45,"used_minor":9000,"limit_minor":20000,"severity":"ok"}\n' $((m1 - 600)) > "$H/.claude/.usage-cache.json"
+rm -f "$H/.claude/.usage-attempt" "$H/.claude/.usage-activity" "$H/.claude/.rl-spend-state"
+out=$(ent PATH="$H/bin:$PATH" FAKE_NOW=$((m1 + 600))); bad=
+has "$out" '45%' && bad=" [drew last month's figure: $out]"; calls || bad="$bad [no refresh asked]"
+verdict last-months-snapshot-is-not-drawn "$bad"
+rm -rf "$H/bin" "$H/.claude/.usage-cache.json"
+# One call every 5 minutes at most (290 s: none, 300 s: one, with the spend total
+# and version); after a rejected login, none for an hour.
+rm -f "$H/.claude/.usage-unavailable"; snap 1200 91; bad=
+attempt $(( $(date +%s) - 290 )); ent >/dev/null; nocall || bad=" [290 s]"
+attempt $(( $(date +%s) - 300 )); ent >/dev/null; { calls && has "$(cat "$H/started")" " 2.1.252"; } || bad="$bad [300 s]"
+why login; attempt $(( $(date +%s) - 400 )); ent >/dev/null; nocall || bad="$bad [login]"
+why "tls 60"; attempt $(( $(date +%s) - 400 )); ent >/dev/null; nocall || bad="$bad [tls]"
+why "login 1800000000000"; attempt $(( $(date +%s) - 400 )); ent >/dev/null; calls || bad="$bad [a fingerprinted login waited the hour]"
+why login $(( $(date +%s) - 3700 ))
+attempt $(( $(date +%s) - 400 )); ent >/dev/null; calls || bad="$bad [login after the hour]"
+verdict call-gap-and-backoff "$bad"
+# Spend is the trigger: a fresh snapshot is asked for again once the local
+# spend since it was fetched reaches 0.25% of the cap, $0.50 of $200, and not
+# before. This session has spent $0.80.
+rm -f "$H/.claude/.usage-unavailable"; bad=
+rm -f "$H/.claude/.usage-activity" "$H/.claude/.usage-attempt"; snap 60 42 0.4; ent >/dev/null; nocall || bad=" [asked at \$0.40 since]"
+rm -f "$H/.claude/.usage-activity" "$H/.claude/.usage-attempt"; snap 60 42 0.3; ent >/dev/null; calls || bad="$bad [not asked at \$0.50 since]"
+verdict spend-asks-for-a-refresh "$bad"
+# `.usage-activity` forgets a session not seen for 8 days, whose cost is in the
+# total already, keeps a recent one, and stamps a line from before there were
+# stamps as seen now. This session's spend still adds to the total.
+now=$(date +%s); snap 60 42; attempt "$now"; bad=
+printf '#total 5.000000\nold 3.000000 %s\nrecent 1.000000 %s\nunstamped 1.000000\n' "$(( now - 777600 ))" "$(( now - 3600 ))" > "$H/.claude/.usage-activity"
+ent >/dev/null; act=$(cat "$H/.claude/.usage-activity")
+has "$act" 'old ' && bad=" [a session not seen for 9 days kept]"
+has "$act" 'recent 1.000000' || bad="$bad [a recent session dropped]"
+like "$act" "*unstamped 1.000000 [0-9]*" || bad="$bad [an unstamped line: $act]"
+has "$act" '#total 5.800000' || bad="$bad [total: $act]"
+like "$act" "*t-ent 0.800000 [0-9]*" || bad="$bad [this session unstamped]"
+verdict activity-forgets-old-sessions "$bad"
+# The waits after a failure, counted from when it happened: offline, only the
+# 5-minute gap; an http error, 10 minutes.
+snap 1200 91; bad=
+why offline $(( $(date +%s) - 290 )); attempt $(( $(date +%s) - 290 )); ent >/dev/null; nocall || bad=" [offline inside the gap]"
+why offline $(( $(date +%s) - 300 )); attempt $(( $(date +%s) - 300 )); ent >/dev/null; calls || bad="$bad [offline after the gap]"
+why "http 500" $(( $(date +%s) - 400 )); attempt $(( $(date +%s) - 400 )); ent >/dev/null; nocall || bad="$bad [http within 10 minutes]"
+why "http 500" $(( $(date +%s) - 700 )); attempt $(( $(date +%s) - 700 )); ent >/dev/null; calls || bad="$bad [http after 10 minutes]"
+rm -f "$H/.claude/.usage-unavailable"
+verdict failure-waits "$bad"
+# The wait after a failure runs from the time written in the reason file. One
+# from the future, which a clock moved back leaves behind (with the file's own
+# date in the future too), is not trusted: the wait counts as over.
+tstamp() { date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$1" +%Y%m%d%H%M.%S 2>/dev/null; }   # tstamp <epoch>: for touch -t
+snap 1200 91; why offline $(( $(date +%s) + 7200 )); touch -t "$(tstamp $(( $(date +%s) + 7200 )))" "$H/.claude/.usage-unavailable"
+attempt $(( $(date +%s) - 400 )); ent >/dev/null; bad=; calls || bad=" [a reason from the future held the call back]"
+verdict future-reason-is-not-trusted "$bad"
+# A snapshot dated in the future has no age to go by, so once a refresh has
+# failed it is not drawn as current: the reason shows instead.
+snap -3600 42; why login; attempt "$(date +%s)"; out=$(ent); bad=
+{ has "$out" '· cap login' && ! has "$out" '42%'; } || bad=" [drew: $out]"
+verdict future-snapshot-gives-way-to-a-failure "$bad"
+rm -f "$H/.claude/.usage-unavailable"
+# From 80% the floor is 5 minutes: a figure 4 minutes old is not asked for
+# again, one 6 minutes old is. The spend seen is high, so only the age can ask.
+snap 240 91 99; attempt $(( $(date +%s) - 400 )); ent >/dev/null; bad=; nocall || bad=" [4 minutes old: asked]"
+snap 360 91 99; attempt $(( $(date +%s) - 400 )); ent >/dev/null; calls || bad="$bad [6 minutes old: not asked]"
+verdict top-floor-is-5m "$bad"
+# Through a native Windows `jq` the snapshot's last field, the spend seen at the
+# last call, must still read as a number, or every render would take the spend
+# for new and ask again.
+crlfjq "$H/crlf"; rm -f "$H/.claude/.usage-attempt" "$H/.claude/.usage-activity"; snap 60 42 0.8
+ent PATH="$H/crlf:$PATH" >/dev/null; bad=; nocall || bad=" [called]"
+verdict crlf-jq-reads-the-spend-seen "$bad"
+# The refresher runs in a session of its own, out of reach of the signal Claude
+# Code sends a replaced render's process group. Needs a `ps` that takes -o.
+if ps -o pgid= -p $$ >/dev/null 2>&1; then
+  printf '#!/bin/sh\nps -o pgid= -p $$ > "${0%%/*}/started"\n' > "$H/usage-refresh.sh"
+  rm -f "$H/.claude/.usage-attempt"; snap 1200 91; ent >/dev/null; bad=
+  calls || bad=" [no start]"
+  [ "$(tr -d ' ' < "$H/started" 2>/dev/null)" != "$(ps -o pgid= -p $$ | tr -d ' ')" ] || bad="$bad [same group]"
+  verdict refresher-runs-in-its-own-group "$bad"
+  printf '#!/bin/sh\necho "$*" >> "${0%%/*}/started"\n' > "$H/usage-refresh.sh"
+else
+  echo "ok   refresher-runs-in-its-own-group (skipped: ps here cannot print a process group)"
+fi
+# A folder the attempt time cannot be written to means no call at all, not one
+# per render. Skipped where a read-only folder is still writable (root, Windows).
+snap 1200 91; attempt $(( $(date +%s) - 400 )); chmod 555 "$H/.claude"
+if ( : > "$H/.claude/.probe" ) 2>/dev/null; then
+  rm -f "$H/.claude/.probe"; chmod 755 "$H/.claude"
+  echo "ok   unwritable-state-means-no-call (skipped: a read-only folder is writable here)"
+else
+  ent >/dev/null; ent >/dev/null; sleep 2; chmod 755 "$H/.claude"
+  check unwritable-state-means-no-call "$(cat "$H/started" 2>/dev/null)" "" "2.1"
+fi
+# A read-only config folder still draws the line, on the ledger and on the
+# enterprise path: the state files are only missed. Skipped where a read-only
+# folder is still writable (root, Windows).
+X=$(mktemp -d); mkdir -p "$X/.claude"; cp "$sl" "$X/statusline.sh"; chmod 555 "$X/.claude"
+if ( : > "$X/.claude/.probe" ) 2>/dev/null; then
+  rm -f "$X/.claude/.probe"; echo "ok   read-only-folder-still-draws (skipped: a read-only folder is writable here)"
+else
+  bad=
+  out=$(sed -e "s|__CWD__|$here|" "$here/payloads/apikey.json" | env HOME="$X" CC_WIDTH=0 "$shell" "$X/statusline.sh" 2>/dev/null | strip)
+  has "$out" '· ctx 880 · $2.50' || bad=" [ledger: $out]"
+  out=$(sed -e "s|__CWD__|$here|" "$here/payloads/enterprise.json" | env HOME="$X" CC_WIDTH=0 CC_ENTERPRISE=1 "$shell" "$X/statusline.sh" 2>/dev/null | strip)
+  has "$out" '· ctx 12.0k' || bad="$bad [enterprise: $out]"
+  verdict read-only-folder-still-draws "$bad"
+fi
+chmod 755 "$X/.claude"; rm -rf "$X"
+# Times from the future (the clock moved back) are not trusted: a 30-day wait,
+# a call dated tomorrow, a snapshot dated in an hour (drawn as new and asked
+# again; its spend_seen is high, so only the date can ask).
+now=$(date +%s); snap 1200 91; bad=
+why "throttled $((now + 2592000)) 1"; attempt $((now - 400)); ent >/dev/null; calls || bad=" [30-day wait]"
+rm -f "$H/.claude/.usage-unavailable"; attempt $((now + 86400)); ent >/dev/null; calls || bad="$bad [call tomorrow]"
+snap -3600 42 99; attempt $((now - 400)); out=$(ent)
+{ has "$out" 'cap 01/' && has "$out" '42%'; } || bad="$bad [snapshot: $out]"; calls || bad="$bad [snapshot not asked]"
+verdict future-times-not-trusted "$bad"
+# CC_USAGE_FLOOR: whole seconds, at least 300, no octal. The floor shows in when
+# a figure is asked for again; the spend seen is high, so only the age can ask.
+rm -f "$H/.claude/.usage-unavailable"; bad=
+snap 400 42 99; attempt $(( $(date +%s) - 400 )); out=$(ent CC_USAGE_FLOOR=30m)     # not a number: 1800
+{ has "$out" '42%' && nocall; } || bad=" [30m: $out]"
+snap 200 42 99; attempt $(( $(date +%s) - 400 )); out=$(ent CC_USAGE_FLOOR=60)      # under 300: 300
+{ has "$out" '42%' && nocall; } || bad="$bad [60: $out]"
+snap 400 42 99; attempt $(( $(date +%s) - 400 )); out=$(ent CC_USAGE_FLOOR=0900)    # 900, not bad octal
+{ has "$out" '42%' && nocall; } || bad="$bad [0900: $out]"
+snap 1000 42 99; attempt $(( $(date +%s) - 400 )); ent CC_USAGE_FLOOR=0900 >/dev/null; calls || bad="$bad [0900, past the floor: not asked]"
+verdict floor-setting-is-checked "$bad"
+rm -rf "$H"
+# The latch holds for a snapshot under 8 days old. A 40-day-old one on a machine
+# now on an API key gives way to the ledger, with no call; `.claude.json` naming
+# an enterprise seat still keeps the path on, whatever the snapshot's age.
+home; snap 60 42
+touch -t "$(tstamp $(( $(date +%s) - 3456000 )))" "$H/.claude/.usage-cache.json"; bad=
+out=$(sed -e "s|__CWD__|$here|" "$here/payloads/apikey.json" | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" | strip)
+{ has "$out" '· $2.50' && ! has "$out" 'cap'; } || bad=" [40 days: $out]"; sleep 1; [ ! -e "$H/started" ] || bad="$bad [called]"
+touch "$H/.claude/.usage-cache.json"; attempt "$(date +%s)"
+has "$(sed -e "s|__CWD__|$here|" "$here/payloads/apikey.json" | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" | strip)" '· cap ' || bad="$bad [fresh latch]"
+touch -t "$(tstamp $(( $(date +%s) - 3456000 )))" "$H/.claude/.usage-cache.json"; printf '{"seatTier":"enterprise_usage_based"}\n' > "$H/.claude.json"
+has "$(sed -e "s|__CWD__|$here|" "$here/payloads/apikey.json" | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh" | strip)" '· cap ' || bad="$bad [named seat]"
+verdict latch-holds-for-8-days "$bad"
+rm -rf "$H"
+# One folder per login: with `CLAUDE_CONFIG_DIR` set, the state lands there, and
+# an enterprise seat is told from that folder's `.claude.json`, with its files
+# beside it. Nothing lands in `~/.claude`.
+X=$(mktemp -d); mkdir -p "$X/home/.claude" "$X/work" "$X/seat"; cp "$sl" "$X/statusline.sh"; bad=
+printf '{"session_id":"s","workspace":{"current_dir":"%s"},"rate_limits":{"five_hour":{"used_percentage":30,"resets_at":%s}}}' "$X" "$(( $(date +%s) + 3600 ))" \
+  | env HOME="$X/home" CC_WIDTH=0 CLAUDE_CONFIG_DIR="$X/work" "$shell" "$X/statusline.sh" >/dev/null
+[ -s "$X/work/.rl-5h-state" ] || bad=" [no 5-hour state in the folder]"
+printf '{"seatTier":"enterprise_usage_based"}\n' > "$X/seat/.claude.json"
+printf '{"session_id":"e","workspace":{"current_dir":"%s"},"cost":{"total_cost_usd":0.5}}' "$X" \
+  | env HOME="$X/home" CC_WIDTH=0 CLAUDE_CONFIG_DIR="$X/seat" "$shell" "$X/statusline.sh" >/dev/null
+{ [ -e "$X/seat/.usage-activity" ] && [ -e "$X/seat/.usage-attempt" ]; } || bad="$bad [enterprise files: $(ls -A "$X/seat" | tr '\n' ' ')]"
+[ -z "$(ls -A "$X/home/.claude")" ] || bad="$bad [wrote in ~/.claude: $(ls -A "$X/home/.claude" | tr '\n' ' ')]"
+verdict state-lands-in-the-config-folder "$bad"
+rm -rf "$X"
+
+# `CC_ENTERPRISE=0` keeps the login out of it: with a leftover snapshot and a
+# `.claude.json` naming an enterprise seat, no cap segment, no attempt written and
+# no refresher started. The ledger draws the dollars instead.
+home; snap 60 42; printf '{"seatTier":"enterprise_usage_based"}\n' > "$H/.claude.json"; bad=
+out=$(sed -e "s|__CWD__|$here|" "$here/payloads/enterprise.json" | env HOME="$H" CC_WIDTH=0 CC_ENTERPRISE=0 "$shell" "$H/statusline.sh" | strip)
+{ has "$out" '· $0.80' && ! has "$out" '· cap '; } || bad=" [drew: $out]"
+[ -e "$H/.claude/.usage-attempt" ] && bad="$bad [an attempt was written]"
+sleep 1; [ -e "$H/started" ] && bad="$bad [the refresher started]"
+verdict enterprise-0-sends-nothing "$bad"
+rm -rf "$H"
 # The ledger adds up every session of the period ($2.50 and $1.00 read $3.50),
 # drops a line from an earlier period, names the period `CC_SPEND_PERIOD` asks
 # for, and reads $42.60 against a cap of 50 as 85%.
@@ -159,6 +540,12 @@ out=$(lpay s 42.5 CC_SPEND_CAP=50); has "$out" '· $2.50/50 5%' || bad="$bad [af
 out=$(lpay b 13 CC_SPEND_CAP=50); has "$out" '· $5.50/50 11%' || bad="$bad [the other session: $out]"
 grep -q ' z ' "$L/.claude/.spend-ledger" && bad="$bad [a line not seen for 8 days kept]"
 verdict ledger-counts-only-this-periods-spend "$bad"
+# With a cap the ledger keeps a record of its own, apart from the gateway's and
+# the Enterprise cap's.
+rm -f "$L/.claude"/.rl-*; lpay a 42.6 CC_SPEND_CAP=50 >/dev/null; bad=
+[ -e "$L/.claude/.rl-ledger-state" ] || bad=" [no ledger record: $(ls -A "$L/.claude" | tr '\n' ' ')]"
+[ -e "$L/.claude/.rl-spend-state" ] && bad="$bad [it wrote the spend record]"
+verdict ledger-keeps-a-record-of-its-own "$bad"
 rm -rf "$L"
 # A record with a field such as 08, which arithmetic would read as bad octal and
 # end the script under dash, is started over: the window still draws, quietly.
@@ -241,6 +628,20 @@ else
 fi
 rm -rf "$N"
 
+# A native Windows `jq` ends its output with a carriage return. It must land in
+# the unread field at the end of the one `jq` call, not in the version the
+# refresher is handed for its User-Agent.
+home; J=$(mktemp -d); crlfjq "$J"
+sed -e "s|__CWD__|$here|" "$here/payloads/enterprise.json" | env HOME="$H" PATH="$J:$PATH" CC_WIDTH=0 CC_ENTERPRISE=1 "$shell" "$H/statusline.sh" >/dev/null
+bad=; calls || bad=" [no start]"
+got=$(cat "$H/started" 2>/dev/null); cr=$(printf '\r')
+case "$got" in
+  *"$cr"*) bad="$bad [a carriage return reached the arguments]" ;;
+  "0.800000 2.1.252") ;;
+  *) bad="$bad [started with: $got]" ;;
+esac
+verdict crlf-jq-keeps-the-last-field "$bad"
+rm -rf "$J" "$H"
 # A folder path with control characters in it (a BEL would end the folder link
 # and start a forged one) loses them before the link is built: no sequence can
 # be forged, and no BEL or ESC of its own reaches the terminal.
@@ -295,6 +696,321 @@ out=$(printf '{"workspace":{"current_dir":"%s/repo"}}' "$I" | env HOME="$I/home"
 bad=; [ "$(idx)" = "$before" ] || bad=" [the index was rewritten]"; has "$out" 'git:(' || bad="$bad [drew: $out]"
 verdict render-leaves-the-index-alone "$bad"
 rm -rf "$I"
+
+# --- `usage-refresh.sh` itself ---
+# `curl` and `security` are shims first on `PATH`, so the real keychain and the
+# real endpoint cannot be reached. The `curl` shim records its arguments and
+# standard input, then answers from `FAKE_CURL_*` (body, headers, http code, a
+# delay, or an exit status as if the request failed).
+R=$(mktemp -d); RH="$R/home"; mkdir -p "$R/bin" "$R/log" "$RH/.claude"
+cat > "$R/bin/curl" <<'EOF'
+#!/bin/sh
+# Like `curl`, read `~/.curlrc` unless `-q` is the first argument. Of its options this
+# stand-in honours one, trace-ascii, which copies what is sent to a file.
+trace=; [ "${1:-}" != -q ] && [ -r "$HOME/.curlrc" ] && trace=$(sed -n 's/^trace-ascii *= *//p' "$HOME/.curlrc")
+for a in "$@"; do printf '%s\n' "$a"; done > "$FAKE_LOG/argv"
+echo x >> "$FAKE_LOG/calls"
+cat > "$FAKE_LOG/stdin"
+[ -n "$trace" ] && cp "$FAKE_LOG/stdin" "$trace"
+out= hdr=
+while [ $# -gt 0 ]; do case "$1" in -o) out=$2 ;; -D) hdr=$2 ;; esac; shift; done
+echo "$$" > "$FAKE_LOG/curl.pid"
+[ -n "${FAKE_CURL_SLEEP:-}" ] && sleep "$FAKE_CURL_SLEEP"
+[ -n "${FAKE_CURL_EXIT:-}" ] && exit "$FAKE_CURL_EXIT"
+# Like a native `curl.exe` under Git Bash, which cannot open a path that holds an
+# apostrophe: such a path is handed over unconverted.
+case "$out$hdr" in *\'*) exit 23 ;; esac
+[ -n "$out" ] && printf '%s' "${FAKE_CURL_BODY:-}" > "$out"
+[ -n "$hdr" ] && printf '%s' "${FAKE_CURL_HEADERS:-}" > "$hdr"
+printf '%s' "${FAKE_CURL_CODE:-200}"
+EOF
+# The security shim records its arguments too. With `FAKE_SERVICE` set it holds
+# only that item, as a keychain with one login would; with `FAKE_ACCOUNT` set, the
+# item is that account's, so a lookup for another account finds nothing and one
+# that names no account finds it. `FAKE_EXPIRES` adds an `expiresAt` to the record.
+cat > "$R/bin/security" <<'EOF'
+#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a"; done > "$FAKE_LOG/security.argv"
+s= ac=; while [ $# -gt 0 ]; do case "$1" in -s) s=$2 ;; -a) ac=$2 ;; esac; shift; done
+[ -z "${FAKE_SERVICE:-}" ] || [ "$s" = "$FAKE_SERVICE" ] || exit 44
+[ -z "${FAKE_ACCOUNT:-}" ] || [ -z "$ac" ] || [ "$ac" = "$FAKE_ACCOUNT" ] || exit 44
+x=; [ -n "${FAKE_EXPIRES:-}" ] && x=",\"expiresAt\":$FAKE_EXPIRES"
+printf '{"claudeAiOauth":{"accessToken":"%s","refreshToken":"FAKE-REFRESH-TOKEN"%s}}\n' "$FAKE_TOKEN" "$x"
+EOF
+chmod +x "$R/bin/curl" "$R/bin/security"
+faketok=FAKE-ACCESS-TOKEN-0123456789
+again() {  # again [VAR=value...]: run the real refresher in $RH, keeping its state
+  t=$(date +%s)   # a 429 is dated from the start of this run
+  env HOME="$RH" PATH="$R/bin:$PATH" FAKE_LOG="$R/log" FAKE_TOKEN="$faketok" "$@" \
+    "$shell" "$here/../usage-refresh.sh" 12.5 2.1.252 </dev/null
+}
+clean() { rm -rf "$RH"/.claude/.usage-* "$R"/log/*; }
+refresh() { clean; again "$@"; }   # the same, from scratch
+away() {  # away <streak> <seconds>: is the last 429 written down as that? A slow machine only adds to it.
+  read -r w u n < "$RH/.claude/.usage-unavailable" 2>/dev/null; d=$(( ${u:-0} - t )); got="$w $n, $d s"
+  [ "$w" = throttled ] && [ "$n" = "$1" ] && [ "$d" -ge $(($2 - 1)) ] && [ "$d" -le $(($2 + 5)) ]
+}
+body='{"spend":{"percent":42.3,"used":{"amount_minor":8460},"limit":{"amount_minor":20000},"severity":"ok"}}'
+resolved=$(env PATH="$R/bin:$PATH" sh -c 'command -v curl; command -v security')
+if [ "$resolved" != "$R/bin/curl
+$R/bin/security" ]; then
+  echo "FAIL refresh-shims-first: curl or security would resolve outside the shim folder, so the refresher tests did not run"
+  fails=$((fails+1))
+else
+  refresh FAKE_CURL_BODY="$body"
+  check refresh-token-not-in-argv "$(cat "$R/log/argv")" "https://api.anthropic.com/api/oauth/usage" "$faketok"
+  check refresh-token-on-stdin    "$(cat "$R/log/stdin")" "Authorization: Bearer $faketok"
+  check refresh-snapshot "$(jq -c '[.percent,.limit_minor,.spend_seen]' "$RH/.claude/.usage-cache.json" 2>&1)" "[42.3,20000,12.5]"
+  check refresh-leaves-only-the-snapshot "[$(ls -A "$RH/.claude" | tr '\n' ' ')]" "[.usage-cache.json ]"
+  # The headers the endpoint expects, as `curl` receives them: the OAuth beta and
+  # the client version in the User-Agent.
+  argv=$(cat "$R/log/argv"); bad=
+  has "$argv" "anthropic-beta: oauth-2025-04-20" || bad=" [no anthropic-beta]"
+  has "$argv" "User-Agent: claude-code/2.1.252" || bad="$bad [no User-Agent with the version]"
+  verdict refresh-sends-its-headers "$bad"
+  # A user's `~/.curlrc` never applies: `-q` comes first, the only place `curl`
+  # honours it. This one would copy the request, token and all, to a file.
+  printf 'trace-ascii = %s/trace\n' "$RH" > "$RH/.curlrc"; refresh FAKE_CURL_BODY="$body"; bad=
+  [ "$(head -1 "$R/log/argv")" = -q ] || bad=" [first argument: $(head -1 "$R/log/argv")]"
+  [ ! -e "$RH/trace" ] || bad="$bad [the token was written to a trace file]"
+  rm -f "$RH/.curlrc" "$RH/trace"
+  verdict refresh-ignores-curlrc "$bad"
+  # What the refresher writes is for this account alone, mode 600, whatever the
+  # umask it was started with. Skipped where file modes are not kept (Windows).
+  ( umask 077; : > "$R/probe" )
+  if [ "$(ls -l "$R/probe" | cut -c1-10)" != -rw------- ]; then
+    echo "ok   refresh-files-are-private (skipped: this system does not keep file modes)"
+  else
+    refresh FAKE_CURL_BODY="$body"; m1=$(ls -l "$RH/.claude/.usage-cache.json" | cut -c1-10)
+    refresh FAKE_CURL_CODE=401; m2=$(ls -l "$RH/.claude/.usage-unavailable" | cut -c1-10)
+    check refresh-files-are-private "$m1 $m2" "-rw------- -rw-------"
+  fi
+  rm -f "$R/probe"
+  refresh FAKE_CURL_CODE=401
+  check refresh-401-is-login "[$(head -1 "$RH/.claude/.usage-unavailable" 2>&1)]" "[login]"
+  # A rejected token is not sent again. The reason carries its expiry as a
+  # fingerprint; while the token is the same no call goes out, and a new /login,
+  # with a new expiry, is tried at once.
+  x=$(( ($(date +%s) + 3600) * 1000 )); bad=
+  refresh FAKE_CURL_CODE=401 FAKE_EXPIRES=$x
+  [ "$(head -1 "$RH/.claude/.usage-unavailable" 2>&1)" = "login $x" ] || bad=" [recorded: $(head -1 "$RH/.claude/.usage-unavailable" 2>&1)]"
+  rm -f "$R/log/argv"; again FAKE_CURL_CODE=401 FAKE_EXPIRES=$x
+  [ ! -e "$R/log/argv" ] || bad="$bad [the rejected token was sent again]"
+  [ "$(head -1 "$RH/.claude/.usage-unavailable" 2>&1)" = "login $x" ] || bad="$bad [then: $(head -1 "$RH/.claude/.usage-unavailable" 2>&1)]"
+  again FAKE_EXPIRES=$((x + 1000)) FAKE_CURL_BODY="$body"
+  { [ -e "$RH/.claude/.usage-cache.json" ] && [ ! -e "$RH/.claude/.usage-unavailable" ]; } || bad="$bad [a new login was not tried]"
+  verdict refresh-rejected-token-waits-for-a-new-one "$bad"
+  refresh FAKE_CURL_CODE=401
+  # The reason file's second line is when it was written.
+  t2=$(sed -n 2p "$RH/.claude/.usage-unavailable" 2>/dev/null); case "$t2" in ''|*[!0-9]*) t2=0 ;; esac
+  d=$(( $(date +%s) - t2 )); bad=; { [ "$d" -ge 0 ] && [ "$d" -le 5 ]; } || bad=" [second line: $t2]"
+  verdict refresh-records-when "$bad"
+  # The reply is capped at 1 MiB, and one over the cap (`curl` exit 63) is not a
+  # usage reply: "api", not "offline".
+  refresh FAKE_CURL_BODY="$body"; bad=
+  [ "$(awk 'p { print; exit } $0 == "--max-filesize" { p = 1 }' "$R/log/argv")" = 1048576 ] || bad=" [no --max-filesize 1048576]"
+  refresh FAKE_CURL_EXIT=63
+  [ "$(head -1 "$RH/.claude/.usage-unavailable" 2>&1)" = api ] || bad="$bad [exit 63 read as: $(head -1 "$RH/.claude/.usage-unavailable" 2>&1)]"
+  verdict refresh-caps-the-reply "$bad"
+  refresh FAKE_CURL_EXIT=7
+  check refresh-curl-failure-is-offline "$(head -1 "$RH/.claude/.usage-unavailable" 2>&1)" "offline 7"
+  # A refused certificate or handshake is "tls", with `curl`'s exit code, and so
+  # is not taken for a dropped network.
+  bad=; for rc in 35 60 77; do
+    refresh FAKE_CURL_EXIT=$rc; [ "$(head -1 "$RH/.claude/.usage-unavailable" 2>&1)" = "tls $rc" ] || bad="$bad [$rc: $(head -1 "$RH/.claude/.usage-unavailable" 2>&1)]"
+  done
+  verdict refresh-tls-is-not-offline "$bad"
+
+  # 429: keep away for the longer of what the server asks and 5 minutes, doubled
+  # for each further 429 in a row, at most an hour. Any other reason in the file,
+  # "http 429" here, starts the count afresh; a success clears it.
+  clean; printf 'http 429\n' > "$RH/.claude/.usage-unavailable"; bad=
+  again FAKE_CURL_CODE=429; away 1 300  || bad="$bad [first: $got]"
+  again FAKE_CURL_CODE=429; away 2 600  || bad="$bad [second: $got]"
+  printf 'throttled %s 60\n' "$(date +%s)" > "$RH/.claude/.usage-unavailable"
+  again FAKE_CURL_CODE=429; away 61 3600 || bad="$bad [61st: $got]"
+  for row in '3037:3037' '120:300' '99999:3600' 'Wed, 21 Oct 2026 07:28:00 GMT:300'; do
+    refresh FAKE_CURL_CODE=429 FAKE_CURL_HEADERS="$(printf 'HTTP/1.1 429 Too Many Requests\r\nRetry-After: %s\r\n\r\n' "${row%:*}")"
+    away 1 "${row##*:}" || bad="$bad [Retry-After ${row%:*}: $got]"
+  done
+  again FAKE_CURL_BODY="$body"; [ ! -e "$RH/.claude/.usage-unavailable" ] || bad="$bad [a success left it]"
+  verdict refresh-429-backs-off "$bad"
+  # Stopped mid-call, the way Claude Code stops a run a newer one replaces: no
+  # reason recorded (not even "offline"), no snapshot, no lock left.
+  clean; env HOME="$RH" PATH="$R/bin:$PATH" FAKE_LOG="$R/log" FAKE_TOKEN="$faketok" FAKE_CURL_SLEEP=5 FAKE_CURL_BODY="$body" \
+    "$shell" "$here/../usage-refresh.sh" 12.5 2.1.252 </dev/null &
+  rpid=$!
+  i=0; while [ ! -s "$R/log/curl.pid" ] && [ "$i" -lt 20 ]; do sleep 1; i=$((i + 1)); done
+  kill -TERM "$rpid" "$(cat "$R/log/curl.pid" 2>/dev/null)" 2>/dev/null; wait "$rpid" 2>/dev/null
+  check refresh-stopped-leaves-nothing "[$(ls -A "$RH/.claude" | tr '\n' ' ')]" "[]"
+  # The lock records its holder. A dead holder's lock, or one older than five
+  # minutes with no pid, is taken over; a refresher still at work keeps its
+  # lock however old (a Mac asleep mid-call finishes it on waking).
+  ago() { date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$1" +%Y%m%d%H%M.%S 2>/dev/null; }
+  lockrun() { rm -f "$RH/.claude/.usage-cache.json"; again FAKE_CURL_BODY="$body"; [ -e "$RH/.claude/.usage-cache.json" ]; }
+  mkdir -p "$R/holder"; printf '#!/bin/sh\nsleep 30\n:\n' > "$R/holder/usage-refresh.sh"
+  live() { "$shell" "$R/holder/usage-refresh.sh" & lv=$!; sleep 1; }   # live: a stand-in refresher at work, its pid in $lv
+  lk="$RH/.claude/.usage-cache.lock"
+  sh -c 'exit 0' & gone=$!; wait "$gone"; bad=
+  clean; mkdir "$lk"; echo "$gone" > "$lk/pid"
+  lockrun || bad=" [dead holder]"; [ ! -e "$lk" ] || bad="$bad [lock not given back]"
+  mkdir "$lk"; touch -t "$(ago $(( $(date +%s) - 600 )))" "$lk"
+  lockrun || bad="$bad [old lock without pid]"
+  live; mkdir "$lk"; echo "$lv" > "$lk/pid"; touch -t "$(ago $(( $(date +%s) - 3600 )))" "$lk"
+  lockrun && bad="$bad [a running refresher's hour-old lock was taken]"
+  kill "$lv" 2>/dev/null; rm -rf "$lk"
+  verdict refresh-lock-knows-its-holder "$bad"
+  # A pid in the lock that now belongs to another program, which happens after
+  # a refresher was killed outright, does not hold it. Skipped where `ps`
+  # cannot show a command (Git Bash).
+  sleep 30 & other=$!
+  if ! ps -o command= -p "$other" >/dev/null 2>&1; then
+    echo "ok   refresh-lock-reused-pid-is-taken-over (skipped: ps here cannot show a command)"
+  else
+    clean; mkdir "$lk"; echo "$other" > "$lk/pid"; bad=
+    lockrun || bad=" [a lock held by another program's pid was kept]"
+    verdict refresh-lock-reused-pid-is-taken-over "$bad"
+  fi
+  kill "$other" 2>/dev/null; rm -rf "$lk"
+  # A run gives the lock back only while it holds its pid: one that lost it to
+  # another run's takeover leaves that run's lock alone.
+  clean; live; bad=
+  env HOME="$RH" PATH="$R/bin:$PATH" FAKE_LOG="$R/log" FAKE_TOKEN="$faketok" FAKE_CURL_SLEEP=3 FAKE_CURL_BODY="$body" \
+    "$shell" "$here/../usage-refresh.sh" 12.5 2.1.252 </dev/null & a=$!
+  i=0; while [ ! -s "$lk/pid" ] && [ "$i" -lt 20 ]; do sleep 1; i=$((i + 1)); done
+  echo "$lv" > "$lk/pid"; wait "$a"
+  [ "$(cat "$lk/pid" 2>/dev/null)" = "$lv" ] || bad=" [the other run's lock was deleted]"
+  kill "$lv" 2>/dev/null; rm -rf "$lk"
+  verdict refresh-gives-back-only-its-own-lock "$bad"
+  # Of two runs that find one stale lock, one takes it over and the other then
+  # finds a refresher at work: one call. An `rm` that takes 3 seconds on the
+  # lock leaves the time for the second to come in between.
+  mkdir -p "$R/slowrm"; printf '#!/bin/sh\ncase "$*" in *usage-cache.lock*) sleep 3 ;; esac\nexec "%s" "$@"\n' "$(command -v rm)" > "$R/slowrm/rm"; chmod +x "$R/slowrm/rm"
+  clean; mkdir "$lk"; echo "$gone" > "$lk/pid"; bad=
+  for d in 0 2; do
+    sleep "$d"
+    env HOME="$RH" PATH="$R/slowrm:$R/bin:$PATH" FAKE_LOG="$R/log" FAKE_TOKEN="$faketok" FAKE_CURL_SLEEP=5 FAKE_CURL_BODY="$body" \
+      "$shell" "$here/../usage-refresh.sh" 12.5 2.1.252 </dev/null &
+  done
+  wait
+  [ "$(wc -l < "$R/log/calls" 2>/dev/null | tr -d ' ')" = 1 ] || bad=" [calls: $(wc -l < "$R/log/calls" 2>/dev/null | tr -d ' ')]"
+  rm -rf "$lk"
+  verdict refresh-takeover-is-atomic "$bad"
+
+  # The Enterprise share is the amount divided by the limit when both are there,
+  # because spend.percent comes rounded (1 for 297 of 20000); else spend.percent.
+  # A usage reply with neither is "nofigure", not "api"; a reply that is not a
+  # usage reply at all is still "api".
+  spend() { printf '{"five_hour":null,"seven_day":null,"limits":[],"spend":{"percent":%s,"used":{"amount_minor":%s},"limit":{"amount_minor":%s},"severity":"ok"}}' "$1" "$2" "$3"; }
+  bad=
+  for row in '1 297 20000:[1.485,297,20000]' '42 null null:[42,null,null]' 'null 8460.0 20000:[42.3,8460,20000]' '7 100 0:[7,100,0]'; do
+    set -- ${row%%:*}; refresh FAKE_CURL_BODY="$(spend "$1" "$2" "$3")"
+    got=$(jq -c '[.percent,.used_minor,.limit_minor]' "$RH/.claude/.usage-cache.json" 2>&1)
+    [ "$got" = "${row#*:}" ] || bad="$bad [$1 $2 $3: $got]"
+  done
+  for b in "$(spend null null null)" '{"five_hour":null,"seven_day":null,"spend":null}'; do
+    refresh FAKE_CURL_BODY="$b"
+    { [ "$(head -1 "$RH/.claude/.usage-unavailable" 2>&1)" = nofigure ] && [ ! -e "$RH/.claude/.usage-cache.json" ]; } || bad="$bad [no figure: $(head -1 "$RH/.claude/.usage-unavailable" 2>&1)]"
+  done
+  refresh FAKE_CURL_BODY='{"error":{"type":"not_found_error"}}'
+  [ "$(head -1 "$RH/.claude/.usage-unavailable" 2>&1)" = api ] || bad="$bad [not a usage reply]"
+  verdict refresh-enterprise-share-and-no-figure "$bad"
+
+  # An expired token is never sent: no call, and "expired" for the line to say
+  # login calmly. The expiry is in milliseconds, as Claude Code writes it; a
+  # figure in seconds is read as seconds, not as a date in 1970.
+  bad=; t=$(date +%s)
+  refresh FAKE_EXPIRES=$(( (t - 60) * 1000 ))
+  [ ! -e "$R/log/argv" ] || bad=" [called with an expired token]"
+  [ "$(head -1 "$RH/.claude/.usage-unavailable" 2>&1)" = expired ] || bad="$bad [reason: $(head -1 "$RH/.claude/.usage-unavailable" 2>&1)]"
+  refresh FAKE_EXPIRES=$(( (t + 3600) * 1000 )) FAKE_CURL_BODY="$body"
+  [ -e "$RH/.claude/.usage-cache.json" ] || bad="$bad [a live token was not sent]"
+  refresh FAKE_EXPIRES=$((t + 3600)) FAKE_CURL_BODY="$body"
+  [ -e "$RH/.claude/.usage-cache.json" ] || bad="$bad [an expiry in seconds read as expired]"
+  printf '{"claudeAiOauth":{"accessToken":"%s","expiresAt":%s}}\n' "$faketok" "$(( (t - 60) * 1000 ))" > "$RH/.claude/.credentials.json"
+  refresh FAKE_SERVICE=none FAKE_CURL_BODY="$body"      # an empty keychain: the file is read
+  [ "$(head -1 "$RH/.claude/.usage-unavailable" 2>&1)" = expired ] || bad="$bad [the credentials file: $(head -1 "$RH/.claude/.usage-unavailable" 2>&1)]"
+  rm -f "$RH/.claude/.credentials.json"
+  verdict refresh-expired-token-is-not-sent "$bad"
+  # Through a native Windows `jq`, which ends its output with a carriage return,
+  # the expiry still reads as a number, and a reply with no figure still reads
+  # as one, not as a shape that moved.
+  crlfjq "$R/crlf"; bad=
+  refresh PATH="$R/crlf:$R/bin:$PATH" FAKE_EXPIRES=$(( ($(date +%s) - 60) * 1000 ))
+  [ ! -e "$R/log/argv" ] || bad=" [an expired token was sent]"
+  refresh PATH="$R/crlf:$R/bin:$PATH" FAKE_CURL_BODY='{"five_hour":null,"seven_day":null,"spend":null}'
+  [ "$(head -1 "$RH/.claude/.usage-unavailable" 2>&1)" = nofigure ] || bad="$bad [no figure read as: $(head -1 "$RH/.claude/.usage-unavailable" 2>&1)]"
+  verdict refresh-survives-a-crlf-jq "$bad"
+
+  # One folder per login. With `CLAUDE_CONFIG_DIR` set, the refresher reads the
+  # keychain item Claude Code keeps for that folder: the plain name plus "-" and
+  # the first 8 hex digits of the folder's sha256, for the account `$USER`. The
+  # shim holds only that item, so the plain name would find nothing. Every file
+  # lands in that folder, none in `~/.claude`.
+  mkdir -p "$RH/work"; bad=
+  if command -v sha256sum >/dev/null 2>&1; then sum=$(printf '%s' "$RH/work" | sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then sum=$(printf '%s' "$RH/work" | shasum -a 256)
+  else sum=$(printf '%s' "$RH/work" | openssl dgst -sha256 -r); fi
+  item="Claude Code-credentials-$(printf '%.8s' "$sum")"
+  refresh CLAUDE_CONFIG_DIR="$RH/work" FAKE_SERVICE="$item" USER=tester FAKE_CURL_BODY="$body"
+  [ "$(tr '\n' ' ' < "$R/log/security.argv" 2>/dev/null)" = "find-generic-password -a tester -w -s $item " ] \
+    || bad=" [asked for: $(tr '\n' ' ' < "$R/log/security.argv" 2>/dev/null)]"
+  [ -e "$RH/work/.usage-cache.json" ] || bad="$bad [no snapshot in the folder]"
+  [ -z "$(ls -A "$RH/.claude")" ] || bad="$bad [wrote in ~/.claude: $(ls -A "$RH/.claude" | tr '\n' ' ')]"
+  # Nothing in the keychain for that folder: the folder's own `.credentials.json`,
+  # never the one in `~/.claude`.
+  rm -rf "$RH/work"/.usage-*
+  printf '{"claudeAiOauth":{"accessToken":"%s"}}\n' "$faketok" > "$RH/work/.credentials.json"
+  printf '{"claudeAiOauth":{"accessToken":"OTHER-LOGIN-TOKEN"}}\n' > "$RH/.claude/.credentials.json"
+  again CLAUDE_CONFIG_DIR="$RH/work" FAKE_SERVICE=none FAKE_CURL_BODY="$body"
+  has "$(cat "$R/log/stdin" 2>/dev/null)" "Bearer $faketok" || bad="$bad [sent: $(cat "$R/log/stdin" 2>/dev/null)]"
+  rm -rf "$RH/work" "$RH/.claude/.credentials.json"
+  verdict refresh-one-folder-per-login "$bad"
+  # A config folder with an apostrophe in its path. Git Bash hands such a path
+  # unconverted to a native `jq.exe` or `curl.exe`, which then cannot open it; the
+  # stand-ins here refuse it the same way. The refresher hands `jq` its files on
+  # stdin and gives `curl` names inside the folder, and the line reads the
+  # snapshot on stdin too.
+  A="$RH/it's here"; mkdir -p "$A" "$R/apos"; bad=
+  printf '#!/bin/sh\nfor a do case "$a" in /*\\'"'"'*) exit 2 ;; esac; done\nexec "%s" "$@"\n' "$(command -v jq)" > "$R/apos/jq"; chmod +x "$R/apos/jq"
+  printf '{"claudeAiOauth":{"accessToken":"%s"}}\n' "$faketok" > "$A/.credentials.json"
+  again CLAUDE_CONFIG_DIR="$A" PATH="$R/apos:$R/bin:$PATH" FAKE_SERVICE=none FAKE_CURL_BODY="$body"
+  [ -e "$A/.usage-cache.json" ] || bad=" [no snapshot: $(head -1 "$A/.usage-unavailable" 2>&1)]"
+  cp "$sl" "$R/statusline.sh"; printf '%s\n' "$(date +%s)" > "$A/.usage-attempt"
+  out=$(sed -e "s|__CWD__|$here|" "$here/payloads/enterprise.json" | env HOME="$RH" CLAUDE_CONFIG_DIR="$A" PATH="$R/apos:$PATH" CC_WIDTH=0 CC_ENTERPRISE=1 "$shell" "$R/statusline.sh" | strip)
+  has "$out" ' 42%' || bad="$bad [drew: $out]"
+  rm -rf "$A" "$R/statusline.sh"
+  verdict apostrophe-folder-reads-and-writes "$bad"
+
+  # A Claude Code that keeps the item under another account name, as a later
+  # version might: nothing for `$USER`, so the same item is read under any
+  # account.
+  refresh USER=tester FAKE_ACCOUNT=claude-code-user FAKE_CURL_BODY="$body"; bad=
+  [ -e "$RH/.claude/.usage-cache.json" ] || bad=" [no snapshot: $(head -1 "$RH/.claude/.usage-unavailable" 2>&1)]"
+  [ "$(tr '\n' ' ' < "$R/log/security.argv" 2>/dev/null)" = "find-generic-password -w -s Claude Code-credentials " ] \
+    || bad="$bad [asked for: $(tr '\n' ' ' < "$R/log/security.argv" 2>/dev/null)]"
+  verdict refresh-keychain-any-account "$bad"
+fi
+rm -rf "$R"
+
+# The keychain name per folder, as Claude Code 2.1.292 was seen to name its
+# items, against digests computed separately with Python's hashlib: the folder
+# as set, trailing slash and all, and an empty one meaning the plain name.
+body=$(sed -n '/^service()/,/^}/p' "$here/../usage-refresh.sh"); bad=
+for row in '/Users/test/.claude-work|-03abf0ee' '/Users/test/.claude-work/|-8bd6f0f5' '|'; do
+  cd_=${row%%|*} want="Claude Code-credentials${row#*|}"
+  got=$(env CLAUDE_CONFIG_DIR="$cd_" "$shell" -c "$body; service; printf '%s' \"\$svc\"")
+  [ "$got" = "$want" ] || bad="$bad [$row: $got]"
+done
+verdict keychain-name-per-folder "$bad"
+# A decomposed é is normalized first, as Claude Code does. Needs `perl`'s
+# Unicode::Normalize.
+if perl -MUnicode::Normalize -e 1 2>/dev/null; then
+  got=$(env CLAUDE_CONFIG_DIR="$(printf '/Users/test/cafe\314\201')" "$shell" -c "$body; service; printf '%s' \"\$svc\"")
+  check keychain-name-normalizes "[$got]" "[Claude Code-credentials-ec5578f1]"
+else
+  echo "ok   keychain-name-normalizes (skipped: no perl Unicode::Normalize here)"
+fi
 
 # --- several sessions: one record per window (see "one record per window" in `statusline.sh`) ---
 # A `date` shim fakes the clock for `date +%s` alone (`FAKE_NOW`), so a window can
@@ -493,7 +1209,7 @@ verdict ascii-narrow-and-effort "$bad"
 rm -rf "$U"
 
 # static guarantees
-sh -n "$sl" && echo "ok   syntax" || { echo "FAIL syntax"; fails=$((fails+1)); }
+sh -n "$sl" && sh -n "$here/../usage-refresh.sh" && echo "ok   syntax" || { echo "FAIL syntax"; fails=$((fails+1)); }
 
 [ "$fails" -eq 0 ] && echo "ALL PASS" || echo "$fails FAILED"
 exit "$fails"

@@ -4,6 +4,7 @@
 # colour alone carries severity. Which segments appear depends on the account:
 #   subscription       5h 20:57 24%, 7d Thu 62%  `rate_limits` in the payload
 #   gateway spend cap  cap 23/Oct 78%            `rate_limits.spend_limit`
+#   enterprise seat    cap 01/Nov 80%            `usage-refresh.sh`, no limits sent
 #   API key            $2.50, $42.60/50 85%      a local ledger, no server data
 command -v jq >/dev/null 2>&1 || { printf 'statusline: jq not installed'; exit 0; }
 # Every JSON file this reads goes through `jq` into an `eval` of `@sh`, and every
@@ -16,8 +17,10 @@ command -v jq >/dev/null 2>&1 || { printf 'statusline: jq not installed'; exit 0
 # folder inside a link, and a C1 control such as ST (U+009C) could end that
 # link early in a terminal that honours them.
 JV='def s: if type == "string" then explode | map(select(. >= 32 and (. < 127 or . > 159))) | implode elif type == "number" then . else empty end; def v(f; d): [f? | s][0] // d;'
-# One `jq` call reads every field of the payload, straight from stdin.
-eval "$(jq -r "$JV"' @sh "cwd=\(v(.workspace.current_dir; v(.cwd; ""))) mdl=\(v(.model.display_name; "")) eff=\(v(.effort.level; "")) tok=\(v(.context_window.total_input_tokens; 0)) ctxp=\(v(.context_window.used_percentage; "")) p5=\(v(.rate_limits.five_hour.used_percentage; "")) r5=\(v(.rate_limits.five_hour.resets_at; "")) p7=\(v(.rate_limits.seven_day.used_percentage; "")) r7=\(v(.rate_limits.seven_day.resets_at; "")) ps=\(v(.rate_limits.spend_limit.used_percentage; "")) rs=\(v(.rate_limits.spend_limit.resets_at; "")) usd=\(v(.cost.total_cost_usd; 0)) sid=\(v(.session_id; ""))"' 2>/dev/null)"
+# One `jq` call reads every field of the payload, straight from stdin. The
+# `eol=1` at the end is a field nobody reads: a native Windows `jq` ends its
+# output with a carriage return, and it lands there instead of in `ver`.
+eval "$(jq -r "$JV"' @sh "cwd=\(v(.workspace.current_dir; v(.cwd; ""))) mdl=\(v(.model.display_name; "")) eff=\(v(.effort.level; "")) tok=\(v(.context_window.total_input_tokens; 0)) ctxp=\(v(.context_window.used_percentage; "")) p5=\(v(.rate_limits.five_hour.used_percentage; "")) r5=\(v(.rate_limits.five_hour.resets_at; "")) p7=\(v(.rate_limits.seven_day.used_percentage; "")) r7=\(v(.rate_limits.seven_day.resets_at; "")) ps=\(v(.rate_limits.spend_limit.used_percentage; "")) rs=\(v(.rate_limits.spend_limit.resets_at; "")) usd=\(v(.cost.total_cost_usd; 0)) sid=\(v(.session_id; "")) ver=\(v(.version; "")) eol=1"' 2>/dev/null)"
 
 [ -n "$cwd" ] || cwd=$PWD
 [ -n "$sid" ] || sid=-          # a session with no id still keeps its own lines
@@ -45,8 +48,8 @@ case "${CC_ASCII:-}" in
      fi ;;
 esac
 # `SEP` between groups, `ELL` for a name cut short (after `KEEP` characters) and
-# then the marks for a dirty and a clean tree, a folder outside git, the effort
-# and the burn estimate.
+# for a figure on its way, then the marks for a dirty and a clean tree, a
+# folder outside git, the effort and the burn estimate.
 if [ -n "$asc" ]; then
   SEP=" ${DIM}|${Z} " ELL=.. KEEP=11 DIRTY='*' CLEAN= FOLDER= EFFORT= BURN='~'
 else
@@ -56,14 +59,22 @@ now=$(date +%s)
 # The login's config folder: `CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
 # Every state file lives there, so two logins on one machine never share one.
 CLAUDE=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+# Claude Code's own state file for this login: `.claude.json` in
+# `CLAUDE_CONFIG_DIR` when set, else in the home folder, unless the config folder
+# holds a `.config.json`, the name older Claude Code versions used.
+cj="$CLAUDE/.config.json"; [ -f "$cj" ] || cj="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
 
 # `sh` has no `local`, so the longer functions prefix their working variables
-# (`r_`) to keep clear of the globals.
+# (`yg_`, `r_`) to keep clear of the globals.
 
 # at <epoch> <format>: the time in the local zone, by BSD `date -r`, else GNU
 # `date -d @`. Empty for anything but a whole epoch.
 at() { case "$1" in ''|*[!0-9]*) return;; esac
   date -r "$1" +"$2" 2>/dev/null || date -d "@$1" +"$2" 2>/dev/null; }
+# agefmt <seconds>: 12m, 3h or 6d, for stamping how old a cached figure is
+agefmt() { if [ "$1" -ge 86400 ]; then printf '%dd' $(($1 / 86400))
+  elif [ "$1" -ge 3600 ]; then printf '%dh' $(($1 / 3600))
+  else printf '%dm' $(($1 / 60)); fi; }
 # ramp <percent>: its colour, in `$R`: green under 50, yellow from 50, red from 80
 ramp() { if [ "$1" -ge 80 ]; then R=$RED; elif [ "$1" -ge 50 ]; then R=$YEL; else R=$GRN; fi; }
 
@@ -92,6 +103,35 @@ width() {
   c=${c#"${c%%[!0]*}"}; c=${c:-0}
   [ "$c" -gt "$m" ] && cols=$((c - m))
 }
+
+# young <file>: true when the file exists and was written in the last 8 days.
+# `date -r` reads a file's time on both BSD and GNU; `stat` differs between
+# them, so it is the fallback and needs both spellings.
+young() {
+  [ -f "$1" ] || return 1
+  yg_m=$(date -r "$1" +%s 2>/dev/null || stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null) || return 1
+  case "$yg_m" in ''|*[!0-9]*) return 1 ;; esac
+  [ $((now - yg_m)) -lt 691200 ]
+}
+
+# The enterprise path (keychain, usage endpoint) runs only where it applies.
+# `CC_ENTERPRISE=1` forces it on, `0` forces it off. Unset, it runs when
+# `.claude.json` names an enterprise usage-based seat or an earlier fetch left a
+# snapshot under 8 days old (the latch below). Otherwise an API-key machine
+# with a leftover claude.ai login would send that token upstream every hour.
+case "${CC_ENTERPRISE:-}" in
+  1) ent=1 ;;
+  0) ent= ;;
+  *) ent=
+     # The latch: a machine that fetched a valid snapshot in the last 8 days
+     # stays on through it, even if the string in `.claude.json` moves, and
+     # `grep` is not needed. An older one no longer holds: an API-key machine
+     # with a leftover snapshot would read the keychain hourly and draw "login"
+     # in place of its dollars.
+     if young "$CLAUDE/.usage-cache.json" || grep -qs enterprise_usage_based "$cj"; then
+       ent=1
+     fi ;;
+esac
 
 # The line is put together at the very end, out of one variable per group:
 # `sg` git, `sm` model and effort, `sc` context, `sb` budget. Each group also
@@ -189,19 +229,21 @@ fi
 # showing the figures it heard last. The record keeps what all of them have
 # seen of one window, as one line in `.rl-<key>-state` in the config folder:
 #   <window> <born> <rose> <seen> <percent> <pace>
-# A window is its key (`5h`, `7d`, `gateway`, `ledger`) plus its reset time. A
-# reset time more than 10 minutes later starts a new record; within 10 minutes
-# it is the same window, whatever the percentage does. An earlier one is a
-# session still on the last window, and it leaves the record alone. While its
-# window lasts it draws its own figure; once that window is over, the record's
-# newer one. A window whose reset time has passed, with no newer one known,
-# reads "5h reset" in dim until a reply brings the new window: its old figure no
-# longer counts, and its old stamp would read as the next reset.
+# A window is its key (`5h`, `7d`, `gateway`, `spend` for the Enterprise cap,
+# `ledger`) plus its reset time. A reset time more than 10 minutes later starts
+# a new record; within 10 minutes it is the same window, whatever the percentage
+# does. An earlier one is a session still on the last window, and it leaves the
+# record alone. While its window lasts it draws its own figure; once that window
+# is over, the record's newer one. A window whose reset time has passed, with no
+# newer one known, reads "5h reset" in dim until a reply brings the new window:
+# its old figure no longer counts, and its old stamp would read as the next
+# reset.
 # Within a window usage only goes up: a higher figure raises the record, a lower
 # one is an older reading and never lowers it. `seen` is the last time a
 # session's own figure reached the record's. While that is under 30 minutes
 # ago, a session whose own figure is lower draws the record's; past that, its
-# own, which is how a figure the server lowers gets in.
+# own, which is how a figure the server lowers gets in. (A figure every session
+# reads from one file is the exception, see `record`.)
 # The burn estimate comes from the record's rises: `pace`, in points a second,
 # is an exponentially weighted moving average of them. A rise counts in full
 # when it comes and fades with time constant `tau`, 30 minutes on the 5-hour
@@ -212,12 +254,14 @@ fi
 # figure would read the others catching up as a burst. The estimate waits until
 # the pace is 5 minutes old: 7 minutes into a record.
 
-# record <key> <percent> <window>: the figure to draw in `$rf` and its window in
-# `$rw`, the burn estimate in `$bt` (" ↯25m", dim or red, or nothing). The
-# window is a reset time, or a name for a period (the local ledger, which has
-# none).
+# record <key> <percent> <window> [shared]: the figure to draw in `$rf` and its
+# window in `$rw`, the burn estimate in `$bt` (" ↯25m", dim or red, or nothing).
+# The window is a reset time, or a name for a period (the local ledger, which
+# has none). `shared`: every session reads this figure from one file (the
+# enterprise snapshot), so a lower one is the server's newer word, a raised cap
+# say, and starts the record again instead of being outvoted.
 record() {
-  rf=$2 rw=$3 bt= r_st="$CLAUDE/.rl-$1-state" r_k=$1 r_p=$2 r_w=$3 r_rise=0 r_wr=
+  rf=$2 rw=$3 bt= r_st="$CLAUDE/.rl-$1-state" r_k=$1 r_p=$2 r_w=$3 r_sh=${4:-} r_rise=0 r_wr=
   case "$r_p" in ''|*[!0-9]*) return ;; esac
   case "$r_w" in ''|0*|*[!0-9A-Za-z]*) return ;; esac
   # seconds to the reset, for a window that is a reset time; none for a name
@@ -235,7 +279,7 @@ record() {
     # a time from the future: the clock moved back, so the record cannot be read
     { [ "$r_T" -gt $((now + 60)) ] || [ "$r_S" -gt $((now + 60)) ]; } && r_ok=
   fi
-  if [ -z "$r_ok" ]; then
+  if [ -z "$r_ok" ] || { [ -n "$r_sh" ] && [ "$r_p" -lt "$r_P" ]; }; then
     keep "$r_st" "$r_w $now $now $now $r_p 0"
     return
   fi
@@ -327,22 +371,158 @@ keep() {
 # `$sbs` the same with a space, and `$sb1` bare: the label and the figure,
 # without the reset stamp, the burn estimate or the dollars.
 # add <full> [bare]: an item with no shorter form passes one argument
+# more <text>: more of the last item, in all three forms (a reason)
 sb= sbs= sb1=
 add() { sb="${sb:+$sb$SEP}$1"; sbs="${sbs:+$sbs }$1"; sb1="${sb1:+$sb1 }${2:-$1}"; }
+more() { sb="$sb$1"; sbs="$sbs$1"; sb1="$sb1$1"; }
 
-# window <pct> <resets_at> <label> <time-format> <state-key>: one window as a
-# budget item. The label carries its own trailing space ("5h "), so the bare
-# form reads 5h 24%.
+# window <pct> <resets_at> <label> <time-format> <state-key> [mid] [shared]: one
+# window as a budget item. The label carries its own trailing space ("5h "), so
+# the bare form reads 5h 24%.
 window() {
   rw=$2
   p=$(printf '%.0f' "$1" 2>/dev/null) || return
   [ "$p" -lt 0 ] && return                            # a negative figure is garbage
   stamp=$(at "$2" "$4")
-  record "$5" "$p" "$2"; p=$rf
+  record "$5" "$p" "$2" "${7:-}"; p=$rf
   case "$rw" in ''|*[!0-9]*) ;; *) [ "$rw" -gt "$now" ] || { add "${DIM}$3reset${Z}"; return 0; } ;; esac
   [ "$rw" = "$2" ] || stamp=$(at "$rw" "$4")         # the record's newer window
   ramp "$p"
-  add "${R}$3${stamp:+$stamp }${p}%${Z}${bt}" "${R}$3${p}%${Z}"
+  add "${R}$3${stamp:+$stamp }${6:+$6 }${p}%${Z}${bt}" "${R}$3${p}%${Z}"
+}
+
+# detach <command...>: run it in the background, in a session of its own.
+# Claude Code stops a status line run that a newer one replaces by signalling
+# its whole process group, and a refresher started plainly with `&` sits in
+# that group, `curl` and all. `setsid` does it on Linux, `perl` on a Mac;
+# failing both, `nohup`, which survives a hangup but not that signal.
+detach() {
+  if command -v setsid >/dev/null 2>&1; then
+    (setsid "$@" >/dev/null 2>&1 </dev/null &) 2>/dev/null
+  elif command -v perl >/dev/null 2>&1; then
+    (perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 1' "$@" >/dev/null 2>&1 </dev/null &) 2>/dev/null
+  else
+    (nohup "$@" >/dev/null 2>&1 </dev/null &) 2>/dev/null
+  fi
+}
+
+# monthreset: the epoch of the next UTC month boundary in `$mr`, and of this
+# month's in `$ms`, or both empty. The usage reply has no reset time for the
+# monthly cap, but a 429 from the server carried `resetsAt` of exactly
+# 2026-09-01T00:00Z, the 1st in UTC, so this follows a checked value. This month
+# began exactly its number of days before the next boundary, since UTC has no
+# daylight saving: no second `date` call.
+monthreset() {
+  y=$(date -u +%Y) m=$(date -u +%m)
+  # Arithmetic reads a leading 0 as octal, so `08` and `09` would fail. Strip it
+  # by hand: the `bash` spelling `10#$m` is rejected by `dash`.
+  m=${m#0}
+  case "$m" in
+    2) dm=28; [ $((y % 4)) = 0 ] && { [ $((y % 100)) != 0 ] || [ $((y % 400)) = 0 ]; } && dm=29 ;;
+    4|6|9|11) dm=30 ;;
+    *) dm=31 ;;
+  esac
+  m=$((m + 1)); [ "$m" -gt 12 ] && { m=1; y=$((y + 1)); }
+  d=$(printf '%04d-%02d-01' "$y" "$m")
+  mr=$(TZ=UTC date -j -f '%Y-%m-%d %H:%M:%S' "$d 00:00:00" +%s 2>/dev/null ||
+    date -u -d "$d 00:00:00" +%s 2>/dev/null)
+  ms=; case "$mr" in ''|*[!0-9]*) mr= ;; *) ms=$((mr - dm * 86400)) ;; esac
+}
+
+
+# failure <file>: why the last refresh failed, if it did, into `$why` and
+# `$wdetail`, when in `$wat`, and how long to wait before retrying: `$backoff`
+# in minutes from `$wat`, or `$until`, an epoch, after a 429 ("throttled
+# <epoch>"). A network blip is worth another go soon, a rejected login is not.
+failure() {
+  dead=$1; why=; wdetail=; wat=0; backoff=60; until=0
+  [ -f "$dead" ] || return 0
+  { read -r why wdetail; read -r wat; } < "$dead" 2>/dev/null
+  case "$why" in
+    offline)   backoff=2 ;;   # transient: the 5-minute gap is the real wait
+    http)      backoff=10 ;;  # server said no; give it a rest
+    throttled) backoff=0; until=${wdetail%% *} ;;
+    expired)   backoff=0 ;;   # no call went out: the shorter gap below is the wait
+    # A rejected login with its token's fingerprint: the refresher sends nothing
+    # while the token is the same, so it can look every 5 minutes for a new one.
+    login)     [ -n "$wdetail" ] && backoff=0 ;;
+    norefresher) backoff=0 ;; # no call either: looked for again after the gap
+    *)         backoff=60 ;;  # nologin, a bare login, nocurl, tls, api, nofigure: hourly
+  esac
+  case "$until" in ''|*[!0-9]*) until=0 ;; esac
+  # The refresher never asks for more than an hour. Further out, the clock
+  # moved: a 30-day wait would read "clears itself" for 30 days.
+  [ "$until" -gt $((now + 3600)) ] && until=0
+  # When it was written. Missing (an older file), garbled, or in the future,
+  # where a clock moved back leaves it: long ago, so its wait is over.
+  case "$wat" in ''|0*|*[!0-9]*) wat=0 ;; esac
+  [ "$wat" -gt $((now + 60)) ] && wat=0
+  return 0
+}
+
+# ask_refresh <arguments...>: start `usage-refresh.sh` with them, unless a call
+# went out in the last 5 minutes or the last failure (read by `failure` first)
+# says to wait. At most one call every 5 minutes, whatever asks for it: one a
+# minute through a burst of spend is enough to draw a 429. The attempt file
+# holds the time of the last call; an empty or garbled one counts as long ago. A
+# token found expired sent nothing, so the next look comes after 2 minutes:
+# Claude Code renews the token on its next request.
+ask_refresh() {
+  att="$CLAUDE/.usage-attempt"; last= gap=300
+  [ "$why" = expired ] && gap=120
+  [ -r "$att" ] && read -r last < "$att" 2>/dev/null
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  [ "$last" -gt "$now" ] && last=0          # a call "in the future": the clock moved back
+  { [ $((now - last)) -ge "$gap" ] && [ "$now" -ge "$until" ]; } || return 0
+  [ -f "$dead" ] && [ "$backoff" != 0 ] && [ $((now - wat)) -lt $((backoff * 60)) ] && return 0
+  # The refresher beside this script first, so the two are always one version,
+  # then the canonical install. It is looked for before anything is written:
+  # with none that can run, no figure would ever come and nothing would say why.
+  ur="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)/usage-refresh.sh"
+  [ -x "$ur" ] || ur="$CLAUDE/usage-refresh.sh"
+  # The time goes in first. If it cannot be written, no call: an unwritable
+  # file would otherwise mean a call on every render.
+  keep "$att" "$now" || return 0
+  if [ ! -x "$ur" ]; then
+    # Said like any other failure, and looked for again after the gap.
+    keep "$dead" "norefresher
+$now"; why=norefresher
+    return 0
+  fi
+  detach "$ur" "$@"
+  return 0
+}
+
+# reason: the last failure in words, in `$rt`, and in `$rc` the colour of who
+# has to act: dim nothing for you to do, yellow you fix it, red the contract
+# broke.
+# Returns 1 when there is no reason it knows to show.
+reason() {
+  case "$why" in
+    offline)   rc=$DIM rt=offline ;;
+    throttled) rc=$DIM rt=throttled ;;      # HTTP 429: it clears itself
+    expired)   rc=$DIM rt=login ;;          # Claude Code renews the token itself
+    nofigure)  rc=$DIM rt='no figure' ;;    # the server has no figure for this seat
+    login|nologin) rc=$YEL rt=login ;;
+    nocurl)    rc=$YEL rt='no curl' ;;
+    norefresher) rc=$YEL rt='no refresher' ;;   # `usage-refresh.sh` missing, or not executable
+    tls)       rc=$YEL rt=tls ;;            # a certificate or handshake refused
+    http)      rc=$RED rt="http ${wdetail}" ;;
+    api)       rc=$RED rt='api moved' ;;
+    *)         return 1 ;;
+  esac
+}
+# said <label>: the reason as a budget item of its own, "cap login"
+said() { reason && add "${rc}$1${rt}${Z}"; }
+# beside <fetched at>: the reason after the figure drawn last, when the failure
+# came after that figure was fetched. The figure is the last one known, and the
+# reason says why no newer one came, at any age.
+beside() { [ -n "$why" ] && [ "$wat" -ge "$1" ] && reason && more " ${rc}${rt}${Z}"; return 0; }
+
+# money <minor units> <currency>: 1240 USD reads $12.40, 1240 EUR reads 12.40 EUR.
+# The values reach `awk` as variables, never as program text.
+money() {
+  awk -v a="$1" -v c="$2" 'BEGIN { if (c == "USD") printf "$%.2f", a / 100; else printf "%.2f %s", a / 100, c }'
 }
 
 # --- 5. budget: always shown, colour carries severity, no threshold gating ---
@@ -352,11 +532,115 @@ if [ -n "$ps" ]; then                                  # gateway spend cap
   # Arithmetic on a reset time that is not a whole epoch (1792730959.5, an ISO
   # date) would end the script and blank the line. Such a time gets no stamp.
   fmt=%H:%M
-  # The time when the reset is within a day, else the date.
+  # The time when the reset is within a day, else the date as the Enterprise
+  # cap writes it: 23.10 beside a dollar figure would read as an amount.
   case "$rs" in ''|*[!0-9]*) ;; *) [ $((rs - now)) -gt 86400 ] && fmt=%d/%b ;; esac
   window "$ps" "$rs" "cap " "$fmt" gateway
+elif [ -z "$p5" ] && [ -n "$ent" ]; then
+  # Enterprise usage-based seat: no `rate_limits` in the payload at all, so the
+  # figures come from the server through `usage-refresh.sh`, which leaves a
+  # snapshot of about 120 bytes. Every name this uses starts empty here, so
+  # nothing from the environment can stand in for a figure.
+  uc="$CLAUDE/.usage-cache.json" ucx= cp= cu= cl= cts=0 cseen=0 mr= ms=
+  if [ -f "$uc" ]; then
+    ucx=1
+    # `eol=1` takes a native Windows `jq`'s carriage return, as in the payload
+    # read, or `cseen` would read as 0 and every render would ask for a refresh.
+    # `jq` reads the file on stdin: Git Bash may hand a native `jq.exe` a path
+    # it cannot open (one with an apostrophe in it).
+    eval "$(jq -r "$JV"' @sh "cp=\(v(.percent; "")) cu=\(v(.used_minor; "")) cl=\(v(.limit_minor; "")) cts=\(v(.fetched_at; 0)) cseen=\(v(.spend_seen; 0)) eol=1"' 2>/dev/null < "$uc")"
+  fi
+  case "$cts"   in ''|*[!0-9]*)   cts=0   ;; esac
+  # A snapshot dated in the future means the clock was moved back after it was
+  # taken. Its age is unknown, so take it as new and ask again soon, rather than
+  # draw it as current for as long as the clock takes to catch up.
+  ufut=; [ "$cts" -gt $((now + 60)) ] && { cts=$now; ufut=1; }
+  case "$cseen" in ''|*[!0-9.]*) cseen=0 ;; esac
+  cage=$((now - cts))
+
+  # Local spend observed so far, accumulated across sessions out of the one
+  # figure every render does hand us (`cost.total_cost_usd`, this session only).
+  # Monotonic, so a session ending or `/clear` cannot walk the total backwards.
+  # One line per session, "<session> <cost> <seen>", under "#total <total>". A
+  # session not seen for 8 days goes: its cost is in the total already, and the
+  # file stays small though every render rewrites it. A line from before there
+  # were stamps counts as seen now. `true`, not `:`: a failed redirect on the
+  # special builtin `:` ends the shell, and a read-only config folder would
+  # blank the line.
+  af="$CLAUDE/.usage-activity"; [ -f "$af" ] || true 2>/dev/null > "$af"
+  tot=$(awk -v sid="$sid" -v cost="$usd" -v now="$now" -v o="$af.$$" '
+    $1=="#total" { tot=$2; next }
+    $1==sid      { prev=$2; next }
+    NF           { w = ($3 == "") ? now : $3 + 0; if (w > now - 691200) print $1, $2, w > o }
+    END { if (cost >= prev) tot += cost - prev; else tot += cost
+          printf "#total %.6f\n", tot > o
+          printf "%s %.6f %d\n", sid, cost, now > o
+          close(o); printf "%.6f", tot }' "$af" 2>/dev/null)
+  mv -f "$af.$$" "$af" 2>/dev/null || rm -f "$af.$$" 2>/dev/null
+  case "$tot" in ''|*[!0-9.]*) tot=0 ;; esac
+
+  # Refresh policy. Spend is the trigger; the clock is only a backstop for spend
+  # that happened on another machine. The floor tightens as the cap nears, but
+  # never below the 5-minute gap between calls (`ask_refresh`). `CC_USAGE_FLOOR`
+  # is whole seconds: anything else falls back to 1800, since "30m" would break
+  # the arithmetic and blank the line, and a value under 300 is raised to 300,
+  # since a floor under the gap would drop the figure as stale between calls.
+  # Leading zeros go, or `08` would be read as octal.
+  floor=${CC_USAGE_FLOOR:-1800}
+  case "$floor" in ''|*[!0-9]*) floor=1800 ;; esac
+  floor=${floor#"${floor%%[!0]*}"}; [ "${floor:-0}" -ge 300 ] || floor=300
+  if [ -n "$cp" ]; then
+    pi=$(printf '%.0f' "$cp" 2>/dev/null)
+    [ "${pi:-0}" -ge 50 ] && floor=600
+    [ "${pi:-0}" -ge 80 ] && floor=300
+  fi
+  need=
+  [ -z "$ucx" ] && need=1
+  [ "$cage" -ge "$floor" ] && need=1
+  [ -n "$ufut" ] && need=1
+  # 0.25% of the limit: one displayed point is 1%, so this cannot miss a change
+  [ "${cl:-0}" -gt 0 ] 2>/dev/null &&
+    awk "BEGIN{exit !(($tot - $cseen) >= ($cl / 100) * 0.0025)}" && need=1
+  failure "$CLAUDE/.usage-unavailable"
+  [ -n "$need" ] && ask_refresh "$tot" "$ver"
+  # A snapshot from the future has no age to go by, so once a refresh has failed
+  # it is not drawn as current until the clock catches up.
+  [ -n "$ufut" ] && [ -n "$why" ] && cp=
+
+  # Past 3x the floor the snapshot is dropped rather than drawn: a visible
+  # unknown beats a confident wrong number, such as a 100% for a cap that has
+  # since reset.
+  # A 429 is the server asking for quiet, not a broken figure, so the last one
+  # stays for at least an hour, with "throttled" beside it. Claude Code's own
+  # /usage keeps its last figure too when the endpoint refuses it.
+  drop=$((floor * 3))
+  [ "$why" = throttled ] && [ "$drop" -lt 3600 ] && drop=3600
+  [ "$cage" -gt "$drop" ] && cp=
+  # A figure fetched before this UTC month began is last month's, however
+  # young: the cap started over at the boundary. It is not drawn, and a fresh
+  # one is asked for. `monthreset` is needed to draw the figure anyway.
+  if [ -n "$cp" ]; then
+    monthreset
+    [ -n "$ms" ] && [ "$cts" -lt "$ms" ] && { cp=; ask_refresh "$tot" "$ver"; }
+  fi
+  case "$cp" in ''|*[!0-9.]*) cp= ;; esac
+  # A reply can carry the share without the amounts: the share is still drawn,
+  # only the dollars need them.
+  case "$cu" in ''|*[!0-9]*) cu= ;; esac
+  case "$cl" in ''|*[!0-9]*) cl= ;; esac
+  if [ -n "$cp" ]; then
+    # The dollars are noise next to how much of the month is gone, so they show
+    # only with `CC_SPEND_DOLLARS` set, and not set to 0.
+    dol=; case "${CC_SPEND_DOLLARS:-0}" in 0) ;; *) [ -n "$cu" ] && [ -n "$cl" ] && dol="$(money "$cu" USD)/$((cl / 100))" ;; esac
+    window "$cp" "$mr" "cap " "%d/%b" spend "$dol" shared
+    beside "$cts"
+  else
+    # No figure to draw: a snapshot too old, or none yet. Say why, or how old the
+    # snapshot is, or, while the first fetch is on its way, a dim placeholder.
+    said "cap " || { [ -n "$ucx" ] && add "${DIM}cap $(agefmt "$cage")-stale${Z}"; } || add "${DIM}cap ${ELL}${Z}"
+  fi
 elif [ -z "$p5" ]; then
-  # No limits in the payload (API key, Bedrock, Vertex). Claude Code only
+  # No cached figures either (API key, Bedrock, Vertex). Claude Code only
   # reports this session's estimated cost, all it has spent since it started,
   # so keep a local ledger per period, one line per session:
   #   <period> <session> <cost> <base> <seen>
