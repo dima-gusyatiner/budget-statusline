@@ -25,10 +25,31 @@ E=$(printf '\033')
 Z="${E}[0m" DIM="${E}[2m" RED="${E}[31m" GRN="${E}[32m" YEL="${E}[33m"
 MAG="${E}[35m" CYN="${E}[36m" BLU="${E}[1;34m"
 
+# Plain ASCII or symbols. `CC_ASCII=1` forces plain ASCII, `0` keeps the
+# symbols. Unset, the line goes plain where the symbols are likely to break: the
+# Linux text console (`TERM=linux`), a locale that does not name UTF-8, and the
+# classic Windows console, which is Git Bash with neither `WT_SESSION` (Windows
+# Terminal) nor `TERM_PROGRAM` (mintty, VS Code) set. A wrong guess costs a
+# plainer line, never a broken one. `uname` costs a process, so it is asked only
+# on Windows (`OS=Windows_NT`) when nothing cheaper has settled the question.
+asc=
+case "${CC_ASCII:-}" in
+  1) asc=1 ;;
+  0) ;;
+  *) [ "${TERM:-}" = linux ] && asc=1
+     case "${LC_ALL:-} ${LC_CTYPE:-} ${LANG:-}" in *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ;; *) asc=1 ;; esac
+     if [ -z "$asc" ] && [ "${OS:-}" = Windows_NT ] && [ -z "${WT_SESSION:-}${TERM_PROGRAM:-}" ]; then
+       case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) asc=1 ;; esac
+     fi ;;
+esac
 # `SEP` between groups, `ELL` for a name cut short (after `KEEP` characters) and
 # then the marks for a dirty and a clean tree, a folder outside git and the
 # effort.
-SEP=" ${DIM}·${Z} " ELL=… KEEP=12 DIRTY=✗ CLEAN=✓ FOLDER=⌂ EFFORT=◊
+if [ -n "$asc" ]; then
+  SEP=" ${DIM}|${Z} " ELL=.. KEEP=11 DIRTY='*' CLEAN= FOLDER= EFFORT=
+else
+  SEP=" ${DIM}·${Z} " ELL=… KEEP=12 DIRTY=✗ CLEAN=✓ FOLDER=⌂ EFFORT=◊
+fi
 now=$(date +%s)
 
 # at <epoch> <format>: the time in the local zone, by BSD `date -r`, else GNU
@@ -70,11 +91,11 @@ width() {
 # terminal too narrow for the full line. See "fit the terminal" at the bottom.
 
 # short <text>: a text over 13 characters cut to 12 and an ellipsis, in
-# `$short`; at 13 or fewer the cut would save nothing. A shell that counts bytes
-# (`dash`, or any shell in the C locale) would cut a character in half. Such a
-# shell also sees non-ASCII bytes as unprintable, so the `[:print:]` test leaves
-# those names whole there, and a shell that counts characters cuts between
-# characters.
+# `$short` (11 and `..` in plain ASCII, the same 13 columns); at 13 or fewer the
+# cut would save nothing. A shell that counts bytes (`dash`, or any shell in the
+# C locale) would cut a character in half. Such a shell also sees non-ASCII
+# bytes as unprintable, so the `[:print:]` test leaves those names whole there,
+# and a shell that counts characters cuts between characters.
 short() {
   short=$1
   case "$short" in *[![:print:]]*) return ;; esac
@@ -113,7 +134,8 @@ case "$cwd" in *[[:cntrl:]]*) lk= fz= ;; esac
 g() { GIT_OPTIONAL_LOCKS=0 git -C "$cwd" "$@" 2>/dev/null; }
 br=$(g symbolic-ref --short HEAD)
 if [ -n "$br" ]; then
-  if [ -n "$(g status --porcelain | head -1)" ]; then f=" ${YEL}${DIRTY}"; else f=" ${GRN}$CLEAN"; fi
+  # the mark brings its own space, so a clean tree in plain ASCII adds nothing
+  if [ -n "$(g status --porcelain | head -1)" ]; then f=" ${YEL}${DIRTY}"; else f="${CLEAN:+ ${GRN}$CLEAN}"; fi
   sg="${lk}${BLU}git:(${RED}${br}${BLU})${f}${Z}${fz}"
   sg1="${lk}${RED}${br}${f}${Z}${fz}"
   short "${br#*/}"               # `feat/narrow-layout` reads `narrow-layout`
@@ -132,7 +154,10 @@ case "$mdl" in *" context)"*) mdl="${mdl%% context)*})${mdl#* context)}" ;; esac
 sm= sm1=
 [ -n "$mdl" ] && { sm="${YEL}${mdl}${Z}"; sm1="${YEL}${mdl%% (*}${Z}"; }      # `sm1`: no "(1M)"
 if [ -n "$eff" ]; then
+  # Plain ASCII has no mark for the effort: after the model the level reads as
+  # itself, alone it says what it is.
   ef="${MAG}${EFFORT}${eff}${Z}"
+  [ -n "$asc" ] && [ -z "$mdl" ] && ef="${DIM}effort${Z} ${MAG}${eff}${Z}"
   sm="${sm:+$sm }$ef"; sm1="${sm1:+$sm1 }$ef"
 fi
 
