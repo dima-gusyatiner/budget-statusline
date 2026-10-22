@@ -39,14 +39,65 @@ check() {  # check <name> <output> <must-contain> [must-not-contain]
   echo "ok   $name"
 }
 
+match() {  # match <name> <output> <glob>: like check, but the last argument is a pattern
+  case "$2" in $3) echo "ok   $1" ;; *) echo "FAIL $1: no match for '$3' in: $2"; fails=$((fails+1)) ;; esac
+}
+
 # A check made of several cases: each case adds what went wrong to `$bad`.
 verdict() { if [ -z "$2" ]; then echo "ok   $1"; else echo "FAIL $1:$2"; fails=$((fails+1)); fi; }
 has() { case "$1" in *"$2"*) return 0 ;; esac; return 1; }    # has <text> <part>
+like() { case "$1" in $2) return 0 ;; esac; return 1; }       # like <text> <glob>
 
-out=$(run subscription.json)
+# 23.5 rounds to 24 and 62.1 to 62, each with its reset stamp.
+out=$(run subscription.json);           match subscription-5h   "$out" '* · 5h ??:?? 24% · 7d *'
+                                        match subscription-7d   "$out" '* · 7d ??? 62%'
 # The effort follows the model after one space; alone, it gets the dot before it.
                                         check model-then-effort "$out" "Opus 5 (1M) ◊high · ctx" "· ◊"
 out=$(run effort-only.json);            check effort-alone      "$out" " · ◊high · ctx 880" "Opus"
+# The colour bands, wherever a share is drawn: green under 50%, yellow from
+# 50%, red from 80%. Each render gets a fresh `HOME`.
+bands() {  # bands <ctx %> <5h %> <7d %>: one render, escape codes and all
+  H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
+  printf '{"workspace":{"current_dir":"%s"},"context_window":{"total_input_tokens":5,"used_percentage":%s},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":%s,"resets_at":%s}}}' \
+    "$H" "$1" "$2" "$(( $(date +%s) + 7200 ))" "$3" "$(( $(date +%s) + 200000 ))" | env HOME="$H" "$shell" "$H/statusline.sh"
+  rm -rf "$H"
+}
+raw=$(bands 12 49.4 80); bad=
+has "$raw" "${E}[32m12%" || bad=" [ctx 12%]"
+has "$raw" "${E}[32m5h " || bad="$bad [49%]"
+has "$raw" "${E}[31m7d " || bad="$bad [80%]"
+raw=$(bands 50 50 79)
+has "$raw" "${E}[33m50%" || bad="$bad [ctx 50%]"
+has "$raw" "${E}[33m5h " || bad="$bad [50%]"
+has "$raw" "${E}[33m7d " || bad="$bad [79%]"
+verdict colour-bands-green-yellow-red "$bad"
+# The gateway cap's reset: a date when it is more than a day away, the time of
+# day when it is sooner.
+out=$(run gateway.json);                match gateway-cap       "$out" '*· cap [0-3][0-9]/[A-Z][a-z][a-z] 78%'
+H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
+out=$(printf '{"workspace":{"current_dir":"%s"},"rate_limits":{"spend_limit":{"used_percentage":78.4,"resets_at":%s}}}' "$H" "$(( $(date +%s) + 3600 ))" \
+      | env HOME="$H" "$shell" "$H/statusline.sh" | strip); rm -rf "$H"
+match gateway-cap-soon "$out" '*· cap [0-2][0-9]:[0-5][0-9] 78%'
+# A gateway reset time that is not a whole epoch still draws the cap, with no
+# stamp and nothing on stderr.
+H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"; bad=
+for r in 1800000000.5 '"2026-11-01T00:00:00Z"'; do
+  out=$(printf '{"workspace":{"current_dir":"%s"},"rate_limits":{"spend_limit":{"used_percentage":78.4,"resets_at":%s}}}' "$H" "$r" \
+        | env HOME="$H" "$shell" "$H/statusline.sh" 2>"$H/err" | strip)
+  has "$out" '· cap 78%' || bad="$bad [$r: $out]"; [ -s "$H/err" ] && bad="$bad [$r, stderr: $(head -1 "$H/err")]"
+done
+rm -rf "$H"; verdict gateway-odd-reset-still-draws "$bad"
+
+# A field of the wrong type (an array, an object, a string where an object
+# belongs) leaves that field empty and the rest of the line intact, quietly.
+H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"; bad=
+for odd in '"model":{"display_name":["a","b"]}' '"model":{"display_name":{"x":1}}' '"model":"Opus","effort":[1]' '"workspace":"/x","cwd":7'; do
+  out=$(printf '{%s,"context_window":{"total_input_tokens":5},"rate_limits":{"five_hour":{"used_percentage":24,"resets_at":%s}}}' "$odd" "$(( $(date +%s) + 7200 ))" \
+        | env HOME="$H" "$shell" "$H/statusline.sh" 2>"$H/err" | strip)
+  like "$out" '* · ctx 5 · 5h ??:?? 24%' || bad="$bad [$odd: $out]"
+  [ -s "$H/err" ] && bad="$bad [$odd, stderr: $(head -1 "$H/err")]"
+done
+rm -rf "$H"; verdict odd-payload-fields-keep-the-line "$bad"
 
 # A folder path with control characters in it (a BEL would end the folder link
 # and start a forged one) loses them before the link is built: no sequence can

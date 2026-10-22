@@ -1,0 +1,1 @@
+{"session_id":"t-gw","version":"2.1.252","model":{"display_name":"Sonnet 5"},"workspace":{"current_dir":"__CWD__"},"context_window":{"total_input_tokens":153000},"cost":{"total_cost_usd":1.0},"rate_limits":{"spend_limit":{"used_percentage":78.4,"resets_at":__T2__}}}
