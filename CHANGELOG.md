@@ -4,6 +4,10 @@ Notable changes to `budget-statusline`. The format follows [Keep a Changelog](ht
 
 ## [Unreleased]
 
+### Fixed
+
+- A missing `jq` is said at every start, with the command to install it, instead of once. The plugin installs without it and shows no status line, so one missed message left nothing to go on.
+
 ## [1.0.0] - 2026-10-22
 
 The first public release.

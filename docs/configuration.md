@@ -116,5 +116,5 @@ Four more belong to the installers. Leave these alone:
 |---|---|
 | `.budget-statusline-manifest` | What the plugin and `install.sh` installed, with checksums, so neither overwrites a file it did not write or one you edited |
 | `.budget-statusline.log` | What the plugin did at session start, and the line to add when it could not wire `settings.json`. Trimmed to the last 200 lines once it passes 400. `install.sh` prints instead of logging |
-| `.budget-statusline-notice` | The message the plugin last showed in Claude Code, so that it is shown once. It goes once there is nothing to say |
+| `.budget-statusline-notice` | The message the plugin last showed in Claude Code, so that it is shown once, except a missing `jq`, which is repeated at every start. It goes once there is nothing to say |
 | `.budget-statusline.lock/` | A folder that exists only while the plugin or `install.sh` is changing the config folder, so two session starts cannot get in each other's way |

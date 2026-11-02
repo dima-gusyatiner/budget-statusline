@@ -346,6 +346,12 @@ eq  hook-nojq-exits-0 "$rc" 0
 yes hook-nojq-installs-the-scripts cmp -s "$repo/statusline.sh" "$CFG/statusline.sh"
 yes hook-nojq-leaves-settings-alone test ! -e "$CFG/settings.json"
 has hook-nojq-logs-the-line-to-add "$(log)" '"statusLine": { "type": "command"'
+# the one failure that leaves no line at all to see: said at every start, with the way out
+has hook-nojq-notice-names-the-tool "$(notice "$out")" 'budget-statusline: jq is not installed'
+has hook-nojq-notice-repeats "$(notice "$(hook PATH="$base/nojq" 2>&1)")" 'jq is not installed'
+has hook-nojq-notice-windows-command "$(notice "$(hook PATH="$base/mingw:$base/nojq" 2>&1)")" 'winget install jqlang.jq'
+hook >/dev/null 2>&1
+yes hook-nojq-notice-goes-with-jq absent "$CFG/.budget-statusline-notice"
 
 # Git Bash cannot run a bare .sh path, so the command names bash. The Windows
 # `uname` is simulated with a shim: this is not a run on Windows.

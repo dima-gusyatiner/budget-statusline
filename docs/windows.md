@@ -5,7 +5,7 @@ There is no separate Windows build. The scripts run in Git Bash, which Claude Co
 ## Setting it up
 
 1. Install [Git for Windows](https://gitforwindows.org), which brings Git Bash, and `jq`: `winget install jqlang.jq`.
-2. Install from Git Bash, with the plugin or with `sh install.sh`. Both write the command with `bash` in front, as `bash ~/.claude/statusline.sh` in the default folder, because a bare `.sh` path does not run on Windows. Setting it up by hand, write it the same way, with forward slashes.
+2. Install from Git Bash, with the plugin or with `sh install.sh`. Both write the command with `bash` in front, as `bash ~/.claude/statusline.sh` in the default folder, because a bare `.sh` path does not run on Windows. Setting it up by hand, write it the same way, with forward slashes. Without `jq` the hook cannot write `settings.json`, so no line appears until `jq` is installed and a new session starts from a new terminal, which has the new `PATH`.
 3. The refresher reads the login from `.credentials.json` in the [config folder](configuration.md#the-config-folder).
 
 ## What to expect

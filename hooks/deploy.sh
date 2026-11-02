@@ -75,6 +75,7 @@ MANIFEST="$CLAUDE/.budget-statusline-manifest"
 LOG="$CLAUDE/.budget-statusline.log"
 NOTICE="$CLAUDE/.budget-statusline-notice"
 notice=                          # what the user should hear about, if anything
+again=                           # say it at every start, not only when it changes
 tell() { notice="${notice:+$notice }$*"; }
 
 mkdir -p "$CLAUDE" 2>/dev/null
@@ -185,7 +186,11 @@ path="~/.claude/statusline.sh"; [ -n "${CLAUDE_CONFIG_DIR:-}" ] && path="$CLAUDE
 case "$path" in *[!A-Za-z0-9_./~:+=@%-]*) path="'$(printf '%s' "$path" | sed "s/'/'\\\\''/g")'" ;; esac
 # Git Bash cannot run a bare `.sh` path as a command, so name the interpreter.
 cmd=$path
-case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) cmd="bash $path" ;; esac
+getjq="Install jq"
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) cmd="bash $path"; getjq="Install jq (winget install jqlang.jq)" ;;
+  Darwin) getjq="Install jq (brew install jq)" ;;
+esac
 
 # The line to add by hand, JSON-escaped so it pastes as it is.
 esc=$(printf '%s' "$cmd" | sed 's/\\/\\\\/g; s/"/\\"/g')
@@ -230,7 +235,9 @@ settings_state() {
 if [ -z "$strangers" ] && [ -f "$CLAUDE/statusline.sh" ] && [ -n "$(recorded statusline.sh)" ]; then
   if ! command -v jq >/dev/null 2>&1; then
     log "jq not found, settings.json not checked. If it has no statusLine, add: $line"
-    tell "jq is not installed, so the status line cannot run and settings.json was not set up. Install jq, then start a new session."
+    # Nothing else shows this failure: no status line, so no line to read a word on.
+    tell "jq is not installed, so the status line cannot run and settings.json was not set up. $getjq, then start a new session from a new terminal."
+    again=1
   else
     case $(settings_state) in
       ours)    ;;                                      # wired already: nothing to say
@@ -261,7 +268,8 @@ fi
 # The user hears once what needs them: a held-back update or an unwired
 # settings.json, as a `systemMessage`, which Claude Code shows the user and
 # keeps out of Claude's context. The text is kept in `$NOTICE`, so it is said
-# again only when it changes, and the file goes once all is well.
+# again only when it changes, or at every start with `$again`, and the file goes
+# once all is well.
 case "$strangers" in
   '') ;;
   *' and '*) tell "$strangers in $CLAUDE were not installed by this plugin, so neither script was installed or updated. Move them aside to let the plugin manage both." ;;
@@ -273,7 +281,7 @@ case "$blocked" in
   *) tell "$blocked in $CLAUDE is edited locally, so neither script was updated. Revert or delete the edit to get updates." ;;
 esac
 if [ -z "$notice" ]; then rm -f "$NOTICE" 2>/dev/null
-elif [ "$(cat "$NOTICE" 2>/dev/null)" != "$notice" ] && printf '%s\n' "$notice" > "$NOTICE.$$" 2>/dev/null \
+elif { [ -n "$again" ] || [ "$(cat "$NOTICE" 2>/dev/null)" != "$notice" ]; } && printf '%s\n' "$notice" > "$NOTICE.$$" 2>/dev/null \
      && mv -f "$NOTICE.$$" "$NOTICE" 2>/dev/null; then
   m=$(printf 'budget-statusline: %s' "$notice" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g')   # JSON-escaped
   printf '{"systemMessage": "%s"}\n' "$m" >&3
