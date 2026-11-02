@@ -202,7 +202,20 @@ clean() {
 # The path goes inside the escape sequence, where a control character (a BEL)
 # could end the link early and start a forged one. The payload's path arrives
 # without them (`$JV`); `$PWD`, its fallback, gets no link if it has one.
-lk="${E}]8;;vscode://file${cwd}${E}\\" fz="${E}]8;;${E}\\"
+# `vscode://file` wants `/C:/Users/me`, and Claude Code on Windows passes
+# `C:\Users\me`. Builtins only: this runs at every render.
+lp=$cwd
+case "$cwd" in
+  [A-Za-z]:[\\/]*)
+    lp=/ lr=$cwd
+    while :; do
+      case "$lr" in
+        *\\*) lh=${lr%%\\*}; lp="$lp$lh/"; lr=${lr#*\\} ;;
+        *) lp="$lp$lr"; break ;;
+      esac
+    done ;;
+esac
+lk="${E}]8;;vscode://file${lp}${E}\\" fz="${E}]8;;${E}\\"
 case "$cwd" in *[[:cntrl:]]*) lk= fz= ;; esac
 # `-C` runs `git` in the session's folder from the payload, wherever this script
 # was started. `git`'s ownership guard stays on: `git status` in a repository

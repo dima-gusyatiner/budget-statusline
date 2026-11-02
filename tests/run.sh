@@ -727,6 +727,14 @@ raw=$(printf '{"workspace":{"current_dir":"/tmp/x\\u0007\\u001b]8;;https://evil.
 rm -rf "$H"
 bad=; { has "$raw" "${E}]8;;https" || has "$raw" "$(printf '\007')"; } && bad=" [a forged link: $(printf '%s' "$raw" | LC_ALL=C od -c | head -3 | tr -s ' ')]"
 verdict folder-path-with-control-characters-cannot-forge-a-link "$bad"
+# `vscode://file` wants `/C:/Users/me`, and Claude Code on Windows passes `C:\Users\me`.
+H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
+linkfor() { printf '{"workspace":{"current_dir":"%s"}}' "$1" | env HOME="$H" CC_WIDTH=0 "$shell" "$H/statusline.sh"; }
+bad=; has "$(linkfor 'C:\\Users\\me\\proj')" 'vscode://file/C:/Users/me/proj' || bad=" [backslashes: $(linkfor 'C:\\Users\\me\\proj' | LC_ALL=C od -c | head -3 | tr -s ' ')]"
+has "$(linkfor 'C:/Users/me/proj')" 'vscode://file/C:/Users/me/proj' || bad="$bad [slashes]"
+has "$(linkfor '/tmp/plain')" 'vscode://file/tmp/plain' || bad="$bad [posix path changed]"
+rm -rf "$H"
+verdict folder-link-takes-a-windows-path "$bad"
 # The C1 controls too (U+0080 to U+009F, here CSI, NEL and OSC), which a shell
 # that counts bytes, or any shell in the C locale, does not see as controls.
 H=$(mktemp -d); mkdir -p "$H/.claude"; cp "$sl" "$H/statusline.sh"
